@@ -281,3 +281,39 @@ Spectators Spectators::filter(bool onlyPlayers, bool onlyMonsters, bool onlyNpcs
 
 	return specs;
 }
+
+Spectators Spectators::filterByContext(uint32_t contextId) const {
+	auto specs = Spectators();
+	
+	if (creatures.empty()) {
+		return specs;
+	}
+
+	specs.creatures.reserve(creatures.size());
+
+	for (const auto &creature : creatures) {
+		if (!creature) {
+			continue;
+		}
+
+		uint32_t creatureContextId = creature->getWorldContextId();
+		
+		// Context matching rules:
+		// - If caller is in global context (0), they see all creatures in global context (0)
+		// - If caller is in private context (N), they only see creatures in the same context (N)
+		// - Creatures in private contexts are invisible to global context viewers
+		if (contextId == 0) {
+			// Global context viewer: only sees global context creatures
+			if (creatureContextId == 0) {
+				specs.insert(creature);
+			}
+		} else {
+			// Private context viewer: only sees same context creatures
+			if (creatureContextId == contextId) {
+				specs.insert(creature);
+			}
+		}
+	}
+
+	return specs;
+}

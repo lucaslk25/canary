@@ -18,6 +18,44 @@ our [customized tools](https://docs.opentibiabr.com/opentibiabr/downloads/tools)
 - [Gitbook](https://docs.opentibiabr.com/opentibiabr/projects/canary).
 - [Wiki](https://github.com/opentibiabr/canary/wiki).
 
+## Build + smoke-test (Linux)
+
+Use `recompile.sh` to configure/build the `linux-release` preset and run a quick smoke test.
+
+What it does:
+- Creates `build/` if needed
+- Configures CMake using the selected preset (defaults to `linux-release`)
+- Builds using the matching build preset
+- Copies the resulting executable to `./canary` (saving any previous binary as `./canary.old`)
+- Runs the built executable (`build/<preset>/bin/canary --help`) as a smoke test
+
+Notes:
+- `VCPKG_ROOT` is passed when calling CMake; by default it uses `$HOME/repos/vcpkg`.
+- Canary currently does not print a help screen for `--help`; it starts normally.
+- If infra (DB) is not configured yet, Canary may exit non-zero due to DB connection failure; `recompile.sh` treats that specific failure as a successful smoke test.
+
+Examples:
+
+```bash
+# Configure (if needed), build, copy to ./canary, then run the smoke test
+./recompile.sh
+
+# Build using 8 parallel jobs
+./recompile.sh --jobs 8
+
+# Point to a specific vcpkg checkout
+./recompile.sh --vcpkg-root "$HOME/repos/vcpkg"
+
+# Only build/copy (skip running the executable)
+./recompile.sh --build-only
+
+# Only run (skip configure/build)
+./recompile.sh --run-only
+
+# Force reconfigure
+./recompile.sh --reconfigure
+```
+
 ## Running Tests
 
 Tests can be run directly from the repository root using CMake test presets:

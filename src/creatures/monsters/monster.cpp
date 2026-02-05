@@ -953,6 +953,11 @@ bool Monster::selectTarget(const std::shared_ptr<Creature> &creature) {
 		return false;
 	}
 
+	// World Context System: monsters can only target creatures in the same context
+	if (!isInSameContext(creature)) {
+		return false;
+	}
+
 	const auto &player = creature ? creature->getPlayer() : nullptr;
 	if (player && player->isLoginProtected()) {
 		return false;

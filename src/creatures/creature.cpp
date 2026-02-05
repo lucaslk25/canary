@@ -689,14 +689,18 @@ bool Creature::dropCorpse(const std::shared_ptr<Creature> &lastHitCreature, cons
 				break;
 		}
 
-		const auto &tile = getTile();
-		if (tile && splash) {
-			g_game().internalAddItem(tile, splash, INDEX_WHEREEVER, FLAG_NOLIMIT);
-			splash->startDecaying();
-		}
+	const auto &tile = getTile();
+	if (tile && splash) {
+		// World Context System: splash inherits creature's context
+		splash->setWorldContextId(getWorldContextId());
+		g_game().internalAddItem(tile, splash, INDEX_WHEREEVER, FLAG_NOLIMIT);
+		splash->startDecaying();
+	}
 
 		const auto &corpse = getCorpse(lastHitCreature, mostDamageCreature);
 		if (tile && corpse) {
+			// World Context System: set corpse context to match the creature's context
+			corpse->setWorldContextId(getWorldContextId());
 			g_game().internalAddItem(tile, corpse, INDEX_WHEREEVER, FLAG_NOLIMIT);
 			dropLoot(corpse->getContainer(), lastHitCreature);
 			corpse->startDecaying();

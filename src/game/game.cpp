@@ -28,6 +28,7 @@
 #include "database/databasetasks.hpp"
 #include "game/scheduling/dispatcher.hpp"
 #include "game/scheduling/save_manager.hpp"
+#include "game/world_context/context_manager.hpp"
 #include "game/zones/zone.hpp"
 #include "io/io_bosstiary.hpp"
 #include "io/io_wheel.hpp"
@@ -71,13 +72,13 @@
 std::vector<std::weak_ptr<Creature>> checkCreatureLists[EVENT_CREATURECOUNT];
 
 namespace InternalGame {
-	void sendBlockEffect(BlockType_t blockType, CombatType_t combatType, const Position &targetPos, const std::shared_ptr<Creature> &source) {
+	void sendBlockEffect(BlockType_t blockType, CombatType_t combatType, const Position &targetPos, const std::shared_ptr<Creature> &source, uint32_t contextId) {
 		if (blockType == BLOCK_DEFENSE) {
-			g_game().addMagicEffect(targetPos, CONST_ME_POFF);
+			g_game().addMagicEffect(targetPos, CONST_ME_POFF, contextId);
 		} else if (blockType == BLOCK_ARMOR) {
-			g_game().addMagicEffect(targetPos, CONST_ME_BLOCKHIT);
+			g_game().addMagicEffect(targetPos, CONST_ME_BLOCKHIT, contextId);
 		} else if (blockType == BLOCK_DODGE) {
-			g_game().addMagicEffect(targetPos, CONST_ME_DODGE);
+			g_game().addMagicEffect(targetPos, CONST_ME_DODGE, contextId);
 		} else if (blockType == BLOCK_IMMUNITY) {
 			uint8_t hitEffect = 0;
 			switch (combatType) {
@@ -105,7 +106,7 @@ namespace InternalGame {
 					break;
 				}
 			}
-			g_game().addMagicEffect(targetPos, hitEffect);
+			g_game().addMagicEffect(targetPos, hitEffect, contextId);
 		}
 
 		if (blockType != BLOCK_NONE) {
@@ -791,46 +792,46 @@ std::shared_ptr<Thing> Game::internalGetThing(const std::shared_ptr<Player> &pla
 				return tile->getTopVisibleThing(player);
 			}
 
-			case STACKPOS_MOVE: {
-				const auto &item = tile->getTopDownItem();
-				if (item && item->isMovable()) {
-					thing = item;
-				} else {
-					thing = tile->getTopVisibleCreature(player);
-				}
-				break;
+		case STACKPOS_MOVE: {
+			const auto &item = tile->getTopDownItem(player);
+			if (item && item->isMovable()) {
+				thing = item;
+			} else {
+				thing = tile->getTopVisibleCreature(player);
 			}
+			break;
+		}
 
-			case STACKPOS_USEITEM: {
-				thing = tile->getUseItem(index);
-				break;
-			}
+		case STACKPOS_USEITEM: {
+			thing = tile->getUseItem(player, index);
+			break;
+		}
 
 			case STACKPOS_TOPDOWN_ITEM: {
 				thing = tile->getTopDownItem();
 				break;
 			}
 
-			case STACKPOS_USETARGET: {
-				thing = tile->getTopVisibleCreature(player);
-				if (!thing) {
-					thing = tile->getUseItem(index);
-				}
-				break;
+		case STACKPOS_USETARGET: {
+			thing = tile->getTopVisibleCreature(player);
+			if (!thing) {
+				thing = tile->getUseItem(player, index);
+			}
+			break;
+		}
+
+		case STACKPOS_FIND_THING: {
+			thing = tile->getUseItem(player, index);
+			if (!thing) {
+				thing = tile->getDoorItem();
 			}
 
-			case STACKPOS_FIND_THING: {
-				thing = tile->getUseItem(index);
-				if (!thing) {
-					thing = tile->getDoorItem();
-				}
-
-				if (!thing) {
-					thing = tile->getTopDownItem();
-				}
-
-				break;
+			if (!thing) {
+				thing = tile->getTopDownItem(player);
 			}
+
+			break;
+		}
 
 			default: {
 				thing = nullptr;
@@ -1382,9 +1383,15 @@ void Game::playerMoveThing(uint32_t playerId, const Position &fromPos, uint16_t 
 
 	const std::shared_ptr<Thing> &thing = internalGetThing(player, fromPos, fromIndex, itemId, STACKPOS_MOVE);
 	if (!thing) {
+		g_logger().debug("[playerMoveThing] Failed to get thing at pos={} fromIndex={} itemId={} playerCtx={}",
+			fromPos.toString(), fromIndex, itemId, player->getWorldContextId());
 		player->sendCancelMessage(RETURNVALUE_NOTPOSSIBLE);
 		return;
 	}
+	
+	g_logger().debug("[playerMoveThing] Got thing: {} at pos={} fromIndex={} playerCtx={}",
+		thing->getItem() ? thing->getItem()->getName() : "creature",
+		fromPos.toString(), fromIndex, player->getWorldContextId());
 
 	if (const std::shared_ptr<Creature> &movingCreature = thing->getCreature()) {
 		const std::shared_ptr<Tile> &tile = map.getTile(toPos);
@@ -2183,6 +2190,10 @@ ReturnValue Game::internalMoveItem(std::shared_ptr<Cylinder> fromCylinder, std::
 
 	// add item
 	if (moveItem /*m - n > 0*/) {
+		// World Context System: item inherits context from actor when moved
+		if (actor && !moveItem->isVisibleToAllContexts()) {
+			moveItem->setWorldContextId(actor->getWorldContextId());
+		}
 		toCylinder->addThing(index, moveItem);
 	}
 
@@ -3158,7 +3169,13 @@ ReturnValue Game::processMoveOrAddItemToLootContainer(const std::shared_ptr<Item
 	std::shared_ptr<Item> moveItem = nullptr;
 	ReturnValue ret;
 	if (item->getParent()) {
+		g_logger().debug("[QuickLoot] Moving item {} (id={}) ctx={} from corpse to lootContainer, player={} playerCtx={}",
+			item->getName(), item->getID(), item->getWorldContextId(),
+			player ? player->getName() : "nullptr", player ? player->getWorldContextId() : 0);
 		ret = internalMoveItem(item->getParent(), lootContainer, INDEX_WHEREEVER, item, item->getItemCount(), &moveItem, 0, player, nullptr, false);
+		g_logger().debug("[QuickLoot] Move result: ret={}, moveItem={}, moveItemCtx={}",
+			static_cast<int>(ret), moveItem ? "exists" : "nullptr",
+			moveItem ? moveItem->getWorldContextId() : 0);
 	} else {
 		ret = internalAddItem(lootContainer, item, INDEX_WHEREEVER);
 	}
@@ -6589,9 +6606,16 @@ bool Game::internalCreatureSay(const std::shared_ptr<Creature> &creature, SpeakC
 		spectators = (*spectatorsPtr);
 	}
 
+	// World Context System: get creature's context for speech filtering
+	uint32_t creatureContextId = creature ? creature->getWorldContextId() : 0;
+
 	// Send to client
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
+			// World Context System: only send speech to players in the same context
+			if (tmpPlayer->getWorldContextId() != creatureContextId) {
+				continue;
+			}
 			if (!ghostMode || tmpPlayer->canSeeCreature(creature)) {
 				tmpPlayer->sendCreatureSay(creature, type, text, pos);
 			}
@@ -6600,6 +6624,10 @@ bool Game::internalCreatureSay(const std::shared_ptr<Creature> &creature, SpeakC
 
 	// event method
 	for (const auto &spectator : spectators) {
+		// World Context System: only trigger events for creatures in the same context
+		if (spectator->getWorldContextId() != creatureContextId) {
+			continue;
+		}
 		spectator->onCreatureSay(creature, type, text);
 	}
 	return true;
@@ -6633,6 +6661,8 @@ void Game::removeCreatureCheck(const std::shared_ptr<Creature> &creature) {
 void Game::checkCreatures() {
 	metrics::method_latency measure(__METRICS_METHOD_NAME__);
 	static size_t index = 0;
+	
+	// World Context System: TODO - Add cloning logic later
 
 	std::erase_if(checkCreatureLists[index], [this](const std::weak_ptr<Creature> &weak) {
 		if (const auto creature = weak.lock()) {
@@ -6803,11 +6833,17 @@ bool Game::combatBlockHit(CombatDamage &damage, const std::shared_ptr<Creature> 
 		return false;
 	}
 
+	// World Context System: determine context for combat effects
+	uint32_t combatContextId = target ? target->getWorldContextId() : 0;
+	if (combatContextId == 0 && attacker) {
+		combatContextId = attacker->getWorldContextId();
+	}
+
 	// Skill dodge (ruse)
 	if (targetPlayer) {
 		auto chance = targetPlayer->getDodgeChance();
 		if ((chance > 0 && uniform_random(0, 10000) < chance) || damage.hazardDodge) {
-			InternalGame::sendBlockEffect(BLOCK_DODGE, damage.primary.type, target->getPosition(), attacker);
+			InternalGame::sendBlockEffect(BLOCK_DODGE, damage.primary.type, target->getPosition(), attacker, combatContextId);
 			targetPlayer->sendTextMessage(MESSAGE_ATTENTION, "You dodged an attack.");
 			return true;
 		}
@@ -6849,7 +6885,7 @@ bool Game::combatBlockHit(CombatDamage &damage, const std::shared_ptr<Creature> 
 		primaryBlockType = target->blockHit(attacker, damage.primary.type, damage.primary.value, checkDefense, checkArmor, field);
 
 		damage.primary.value = -damage.primary.value;
-		InternalGame::sendBlockEffect(primaryBlockType, damage.primary.type, target->getPosition(), attacker);
+		InternalGame::sendBlockEffect(primaryBlockType, damage.primary.type, target->getPosition(), attacker, combatContextId);
 		// Damage reflection primary
 		if (!damage.extension && attacker) {
 			const auto &attackerMonster = attacker->getMonster();
@@ -6919,7 +6955,7 @@ bool Game::combatBlockHit(CombatDamage &damage, const std::shared_ptr<Creature> 
 		secondaryBlockType = target->blockHit(attacker, damage.secondary.type, damage.secondary.value, false, false, field);
 
 		damage.secondary.value = -damage.secondary.value;
-		InternalGame::sendBlockEffect(secondaryBlockType, damage.secondary.type, target->getPosition(), attacker);
+		InternalGame::sendBlockEffect(secondaryBlockType, damage.secondary.type, target->getPosition(), attacker, combatContextId);
 
 		if (!damage.extension && attacker && target->getMonster()) {
 			int32_t secondaryReflectPercent = target->getReflectPercent(damage.secondary.type, true);
@@ -7029,10 +7065,16 @@ void Game::combatGetTypeInfo(CombatType_t combatType, const std::shared_ptr<Crea
 					break;
 			}
 
-			if (splash) {
-				internalAddItem(target->getTile(), splash, INDEX_WHEREEVER, FLAG_NOLIMIT);
-				splash->startDecaying();
-			}
+		// World Context System: create splash with target's context
+		// This ensures splash is only visible to players in the same context
+		if (splash) {
+			uint32_t targetCtx = target->getWorldContextId();
+			splash->setWorldContextId(targetCtx);
+			g_logger().debug("[Blood] Creating splash for target {} (ctx={}), splash ctx after set: {}, visibleToAll: {}",
+				target->getName(), targetCtx, splash->getWorldContextId(), splash->isVisibleToAllContexts());
+			internalAddItem(target->getTile(), splash, INDEX_WHEREEVER, FLAG_NOLIMIT);
+			splash->startDecaying();
+		}
 
 			break;
 		}
@@ -7251,6 +7293,12 @@ int32_t Game::applyHealthChange(const CombatDamage &damage, const std::shared_pt
 
 bool Game::combatChangeHealth(const std::shared_ptr<Creature> &attacker, const std::shared_ptr<Creature> &target, CombatDamage &damage, bool isEvent /*= false*/) {
 	using namespace std;
+
+	// World Context System: no combat between different contexts
+	if (attacker && target && !attacker->isInSameContext(target)) {
+		return false;
+	}
+
 	const Position &targetPos = target->getPosition();
 	if (damage.primary.value > 0) {
 		if (target->getHealth() <= 0) {
@@ -7743,9 +7791,21 @@ void Game::sendMessages(
 
 	std::string spectatorMessage;
 
+	// World Context System: determine the context for this combat
+	uint32_t combatContextId = target ? target->getWorldContextId() : 0;
+	if (combatContextId == 0 && attacker) {
+		combatContextId = attacker->getWorldContextId();
+	}
+
 	for (const std::shared_ptr<Creature> &spectator : spectators) {
 		std::shared_ptr<Player> tmpPlayer = spectator->getPlayer();
 		if (!tmpPlayer || tmpPlayer->getPosition().z != targetPos.z) {
+			continue;
+		}
+
+		// World Context System: only send damage messages to players in the same context
+		// Both viewer and combat must be in the same context (including context 0)
+		if (tmpPlayer->getWorldContextId() != combatContextId) {
 			continue;
 		}
 
@@ -7862,18 +7922,21 @@ void Game::sendEffects(
 	const std::shared_ptr<Creature> &target, const CombatDamage &damage, const Position &targetPos, TextMessage &message,
 	const CreatureVector &spectators
 ) {
+	// World Context System: use target's context for effect visibility
+	uint32_t contextId = target ? target->getWorldContextId() : 0;
+
 	uint16_t hitEffect;
 	if (message.primary.value) {
 		combatGetTypeInfo(damage.primary.type, target, message.primary.color, hitEffect);
 		if (hitEffect != CONST_ME_NONE) {
-			addMagicEffect(spectators, targetPos, hitEffect);
+			addMagicEffect(spectators, targetPos, hitEffect, contextId);
 		}
 	}
 
 	if (message.secondary.value) {
 		combatGetTypeInfo(damage.secondary.type, target, message.secondary.color, hitEffect);
 		if (hitEffect != CONST_ME_NONE) {
-			addMagicEffect(spectators, targetPos, hitEffect);
+			addMagicEffect(spectators, targetPos, hitEffect, contextId);
 		}
 	}
 }
@@ -7968,6 +8031,11 @@ int32_t Game::calculateLeechAmount(const int32_t &realDamage, const uint16_t &sk
 }
 
 bool Game::combatChangeMana(const std::shared_ptr<Creature> &attacker, const std::shared_ptr<Creature> &target, CombatDamage &damage) {
+	// World Context System: no combat between different contexts
+	if (attacker && target && !attacker->isInSameContext(target)) {
+		return false;
+	}
+
 	const Position &targetPos = target->getPosition();
 	auto manaChange = damage.primary.value + damage.secondary.value;
 	auto spectators = Spectators().find<Player>(targetPos);
@@ -8252,10 +8320,27 @@ void Game::addMagicEffect(const Position &pos, uint16_t effect) {
 	addMagicEffect(spectators.data(), pos, effect);
 }
 
+void Game::addMagicEffect(const Position &pos, uint16_t effect, uint32_t contextId) {
+	auto spectators = Spectators().find<Player>(pos, true);
+	addMagicEffect(spectators.data(), pos, effect, contextId);
+}
+
 void Game::addMagicEffect(const CreatureVector &spectators, const Position &pos, uint16_t effect) {
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
 			tmpPlayer->sendMagicEffect(pos, effect);
+		}
+	}
+}
+
+void Game::addMagicEffect(const CreatureVector &spectators, const Position &pos, uint16_t effect, uint32_t contextId) {
+	// World Context System: only send effect to players in the same context
+	// Both viewer and effect must be in the same context (including context 0)
+	for (const auto &spectator : spectators) {
+		if (const auto &tmpPlayer = spectator->getPlayer()) {
+			if (tmpPlayer->getWorldContextId() == contextId) {
+				tmpPlayer->sendMagicEffect(pos, effect);
+			}
 		}
 	}
 }
@@ -8278,10 +8363,27 @@ void Game::addDistanceEffect(const Position &fromPos, const Position &toPos, uin
 	addDistanceEffect(spectators.data(), fromPos, toPos, effect);
 }
 
+void Game::addDistanceEffect(const Position &fromPos, const Position &toPos, uint16_t effect, uint32_t contextId) {
+	auto spectators = Spectators().find<Player>(fromPos).find<Player>(toPos);
+	addDistanceEffect(spectators.data(), fromPos, toPos, effect, contextId);
+}
+
 void Game::addDistanceEffect(const CreatureVector &spectators, const Position &fromPos, const Position &toPos, uint16_t effect) {
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
 			tmpPlayer->sendDistanceShoot(fromPos, toPos, effect);
+		}
+	}
+}
+
+void Game::addDistanceEffect(const CreatureVector &spectators, const Position &fromPos, const Position &toPos, uint16_t effect, uint32_t contextId) {
+	// World Context System: only send effect to players in the same context
+	// Both viewer and effect must be in the same context (including context 0)
+	for (const auto &spectator : spectators) {
+		if (const auto &tmpPlayer = spectator->getPlayer()) {
+			if (tmpPlayer->getWorldContextId() == contextId) {
+				tmpPlayer->sendDistanceShoot(fromPos, toPos, effect);
+			}
 		}
 	}
 }

@@ -1,0 +1,40 @@
+# Clangd configuration for Canary OT Server
+# Provides real-time error highlighting in VS Code/Cursor
+
+CompileFlags:
+  # Use compile_commands.json from the debug build
+  CompilationDatabase: build/linux-debug
+
+  # Additional flags for better analysis
+  Add:
+    - "-std=c++23"
+    - "-Wno-unknown-warning-option"
+
+  # Remove flags that clangd doesn't understand well
+  Remove:
+    - "-flto*"
+    - "-fno-fat-lto-objects"
+    - "-fopenmp"
+    - "-march=native"
+
+Diagnostics:
+  # Show all errors immediately
+  UnusedIncludes: None
+  MissingIncludes: None
+
+  ClangTidy:
+    # Basic checks - add more as needed
+    Add:
+      - bugprone-*
+      - modernize-use-nullptr
+      - readability-container-size-empty
+    Remove:
+      - bugprone-easily-swappable-parameters
+
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
+
+Hover:
+  ShowAKA: true

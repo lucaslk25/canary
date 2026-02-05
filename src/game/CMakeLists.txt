@@ -10,4 +10,6 @@ target_sources(
             scheduling/task.cpp
             scheduling/save_manager.cpp
             zones/zone.cpp
+            world_context/context_manager.cpp
+            world_context/tile_layer_manager.cpp
 )

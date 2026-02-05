@@ -145,10 +145,30 @@ public:
 	std::shared_ptr<Creature> getTopCreature() const;
 	std::shared_ptr<Creature> getBottomCreature() const;
 	std::shared_ptr<Creature> getTopVisibleCreature(const std::shared_ptr<Creature> &creature) const;
+	
+	/**
+	 * @brief Get items visible to a specific context (layer-aware).
+	 * Returns base items + layer overrides for the given context.
+	 * 
+	 * @param contextId The world context ID (0 = global)
+	 * @return Vector of items visible in this context
+	 */
+	std::vector<std::shared_ptr<Item>> getItemsForContext(uint32_t contextId) const;
+	
+	/**
+	 * @brief Check if tile has a specific flag for a given context.
+	 * Layer-aware version that only considers items visible in the context.
+	 * 
+	 * @param flag The flag to check
+	 * @param contextId The world context ID
+	 * @return true if any visible item has the flag
+	 */
+	bool hasFlagForContext(TileFlags_t flag, uint32_t contextId) const;
 
 	std::shared_ptr<Creature> getBottomVisibleCreature(const std::shared_ptr<Creature> &creature) const;
 	std::shared_ptr<Item> getTopTopItem() const;
 	std::shared_ptr<Item> getTopDownItem() const;
+	std::shared_ptr<Item> getTopDownItem(const std::shared_ptr<Player> &player) const;
 	bool isMovableBlocking() const;
 	std::shared_ptr<Thing> getTopVisibleThing(const std::shared_ptr<Creature> &creature);
 	std::shared_ptr<Item> getItemByTopOrder(int32_t topOrder);
@@ -222,12 +242,14 @@ public:
 	void removeThing(const std::shared_ptr<Thing> &thing, uint32_t count) final;
 
 	void removeCreature(const std::shared_ptr<Creature> &creature);
+	void removeItemsByContext(uint32_t contextId);
 
 	int32_t getThingIndex(const std::shared_ptr<Thing> &thing) const final;
 	size_t getFirstIndex() const final;
 	size_t getLastIndex() const final;
 	uint32_t getItemTypeCount(uint16_t itemId, int32_t subType = -1) const final;
 	std::shared_ptr<Thing> getThing(size_t index) const final;
+	std::shared_ptr<Thing> getThingForPlayer(const std::shared_ptr<Player> &player, size_t index) const;
 
 	void postAddNotification(const std::shared_ptr<Thing> &thing, const std::shared_ptr<Cylinder> &oldParent, int32_t index, CylinderLink_t link = LINK_OWNER) final;
 	void postRemoveNotification(const std::shared_ptr<Thing> &thing, const std::shared_ptr<Cylinder> &newParent, int32_t index, CylinderLink_t link = LINK_OWNER) final;
@@ -244,6 +266,7 @@ public:
 	}
 
 	std::shared_ptr<Item> getUseItem(int32_t index) const;
+	std::shared_ptr<Item> getUseItem(const std::shared_ptr<Player> &player, int32_t index) const;
 	std::shared_ptr<Item> getDoorItem() const;
 
 	std::shared_ptr<Item> getGround() const {

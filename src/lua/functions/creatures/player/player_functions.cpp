@@ -20,6 +20,7 @@
 #include "server/network/protocol/protocolgame.hpp"
 #include "game/game.hpp"
 #include "game/scheduling/save_manager.hpp"
+#include "game/world_context/context_manager.hpp"
 #include "io/iobestiary.hpp"
 #include "io/iologindata.hpp"
 #include "io/ioprey.hpp"
@@ -412,6 +413,11 @@ void PlayerFunctions::init(lua_State* L) {
 	Lua::registerMethod(L, "Player", "setMapShader", PlayerFunctions::luaPlayerSetMapShader);
 	Lua::registerMethod(L, "Player", "removeCustomOutfit", PlayerFunctions::luaPlayerRemoveCustomOutfit);
 	Lua::registerMethod(L, "Player", "addCustomOutfit", PlayerFunctions::luaPlayerAddCustomOutfit);
+
+	// World Context (Instanced Hunts)
+	Lua::registerMethod(L, "Player", "getWorldContextId", PlayerFunctions::luaPlayerGetWorldContextId);
+	Lua::registerMethod(L, "Player", "setWorldContextId", PlayerFunctions::luaPlayerSetWorldContextId);
+	Lua::registerMethod(L, "Player", "createWorldContext", PlayerFunctions::luaPlayerCreateWorldContext);
 
 	GroupFunctions::init(L);
 	GuildFunctions::init(L);
@@ -5036,5 +5042,65 @@ int PlayerFunctions::luaPlayerResetOldCharms(lua_State* L) {
 
 	player->resetOldCharms();
 	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+// World Context (Instanced Hunts)
+int PlayerFunctions::luaPlayerGetWorldContextId(lua_State* L) {
+	// player:getWorldContextId()
+	const auto &player = Lua::getUserdataShared<Player>(L, 1, "Player");
+	if (!player) {
+		lua_pushnil(L);
+		return 1;
+	}
+	lua_pushnumber(L, player->getWorldContextId());
+	return 1;
+}
+
+int PlayerFunctions::luaPlayerSetWorldContextId(lua_State* L) {
+	// player:setWorldContextId(contextId)
+	const auto &player = Lua::getUserdataShared<Player>(L, 1, "Player");
+	if (!player) {
+		lua_pushnil(L);
+		return 1;
+	}
+
+	uint32_t contextId = Lua::getNumber<uint32_t>(L, 2, 0);
+	
+	// Use movePlayerToContext to properly switch contexts
+	// This will:
+	// 1. Update player's contextId
+	// 2. Track/untrack in contexts
+	// 3. Send context switch packet to client (0x39)
+	// 4. Send full map description
+	g_contextManager().movePlayerToContext(player, contextId);
+	
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int PlayerFunctions::luaPlayerCreateWorldContext(lua_State* L) {
+	// player:createWorldContext()
+	// Creates a new context and switches the player to it
+	const auto &player = Lua::getUserdataShared<Player>(L, 1, "Player");
+	if (!player) {
+		lua_pushnil(L);
+		return 1;
+	}
+
+	// Create context via ContextManager
+	uint32_t newContextId = g_contextManager().createContext(player);
+	
+	if (newContextId == 0) {
+		// Failed to create context
+		lua_pushnil(L);
+		return 1;
+	}
+	
+	// Move player to the new context (sends packet 0x39 and map)
+	g_contextManager().movePlayerToContext(player, newContextId);
+	
+	// Return the new context ID
+	lua_pushnumber(L, newContextId);
 	return 1;
 }

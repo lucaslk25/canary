@@ -38,12 +38,13 @@ public:
 			case ItemAttribute_t::OPENCONTAINER:
 			case ItemAttribute_t::QUICKLOOTCONTAINER:
 			case ItemAttribute_t::OBTAINCONTAINER:
-			case ItemAttribute_t::DURATION_TIMESTAMP:
-			case ItemAttribute_t::TIER:
-			case ItemAttribute_t::AMOUNT:
-				return true;
-			default:
-				return false;
+		case ItemAttribute_t::DURATION_TIMESTAMP:
+		case ItemAttribute_t::TIER:
+		case ItemAttribute_t::AMOUNT:
+		case ItemAttribute_t::WORLDCONTEXTID:
+			return true;
+		default:
+			return false;
 		}
 	}
 

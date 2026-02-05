@@ -397,5 +397,10 @@ class PlayerFunctions {
 	static int luaPlayerAddCustomOutfit(lua_State* L);
 	static int luaPlayerRemoveCustomOutfit(lua_State* L);
 
+	// World Context (Instanced Hunts)
+	static int luaPlayerGetWorldContextId(lua_State* L);
+	static int luaPlayerSetWorldContextId(lua_State* L);
+	static int luaPlayerCreateWorldContext(lua_State* L);
+
 	friend class CreatureFunctions;
 };

@@ -17,6 +17,7 @@
 #include "enums/account_type.hpp"
 #include "game/game.hpp"
 #include "game/movement/teleport.hpp"
+#include "game/world_context/tile_layer_manager.hpp"
 #include "game/zones/zone.hpp"
 #include "items/containers/mailbox/mailbox.hpp"
 #include "items/trashholder.hpp"
@@ -319,6 +320,39 @@ std::shared_ptr<Item> Tile::getTopDownItem() const {
 	return nullptr;
 }
 
+std::shared_ptr<Item> Tile::getTopDownItem(const std::shared_ptr<Player> &player) const {
+	if (!player) {
+		return getTopDownItem();
+	}
+	
+	const TileItemVector* items = getItemList();
+	if (!items) {
+		return nullptr;
+	}
+	
+	uint32_t playerCtx = player->getWorldContextId();
+	
+	// Find first visible down item for this player's context
+	for (auto it = items->getBeginDownItem(), end = items->getEndDownItem(); it != end; ++it) {
+		const auto &item = *it;
+		
+		// Players in private contexts (not 0) should NOT see/interact with map items
+		if (item->isVisibleToAllContexts()) {
+			if (playerCtx == 0) {
+				return item; // Only global context can interact with map items
+			}
+			continue; // Skip map items for private contexts
+		}
+		
+		// Check if item belongs to player's context
+		if (item->getWorldContextId() == playerCtx) {
+			return item;
+		}
+	}
+	
+	return nullptr;
+}
+
 std::shared_ptr<Item> Tile::getTopTopItem() const {
 	if (const TileItemVector* items = getItemList()) {
 		return items->getTopTopItem();
@@ -391,16 +425,37 @@ void Tile::onAddTileItem(const std::shared_ptr<Item> &item) {
 
 	const auto spectators = Spectators().find<Creature>(cylinderMapPos, true);
 
+	// World Context System: get item's context for visibility filtering
+	uint32_t itemContextId = item->getWorldContextId();
+	bool visibleToAll = item->isVisibleToAllContexts();
+
+	g_logger().debug("[onAddTileItem] Item: {} id={} ctx={} visibleToAll={} pos={}", 
+		item->getName(), item->getID(), itemContextId, visibleToAll, cylinderMapPos.toString());
+
 	// send to client
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
-			tmpPlayer->sendAddTileItem(static_self_cast<Tile>(), cylinderMapPos, item);
+			uint32_t playerCtx = tmpPlayer->getWorldContextId();
+			bool shouldSend = visibleToAll || playerCtx == itemContextId;
+			
+			g_logger().debug("[onAddTileItem] Player: {} playerCtx={} shouldSend={}", 
+				tmpPlayer->getName(), playerCtx, shouldSend);
+			
+			// World Context System: 
+			// - Items with CONTEXT_VISIBLE_TO_ALL (map items) are visible to everyone
+			// - Other items are only visible to players in the same context
+			if (shouldSend) {
+				tmpPlayer->sendAddTileItem(static_self_cast<Tile>(), cylinderMapPos, item);
+			}
 		}
 	}
 
 	// event methods
 	for (const auto &spectator : spectators) {
-		spectator->onAddTileItem(static_self_cast<Tile>(), cylinderMapPos);
+		// World Context System: same logic for events
+		if (item->isVisibleToAllContexts() || spectator->getWorldContextId() == itemContextId) {
+			spectator->onAddTileItem(static_self_cast<Tile>(), cylinderMapPos);
+		}
 	}
 
 	if ((!hasFlag(TILESTATE_PROTECTIONZONE) || g_configManager().getBoolean(CLEAN_PROTECTION_ZONES))
@@ -480,16 +535,27 @@ void Tile::onUpdateTileItem(const std::shared_ptr<Item> &oldItem, const ItemType
 
 	const auto spectators = Spectators().find<Creature>(cylinderMapPos, true);
 
+	// World Context System: get item's context for visibility filtering
+	uint32_t itemContextId = newItem->getWorldContextId();
+
 	// send to client
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
-			tmpPlayer->sendUpdateTileItem(static_self_cast<Tile>(), cylinderMapPos, newItem);
+			// World Context System:
+			// - Items with CONTEXT_VISIBLE_TO_ALL (map items) are visible to everyone
+			// - Other items are only visible to players in the same context
+			if (newItem->isVisibleToAllContexts() || tmpPlayer->getWorldContextId() == itemContextId) {
+				tmpPlayer->sendUpdateTileItem(static_self_cast<Tile>(), cylinderMapPos, newItem);
+			}
 		}
 	}
 
 	// event methods
 	for (const auto &spectator : spectators) {
-		spectator->onUpdateTileItem(static_self_cast<Tile>(), cylinderMapPos, oldItem, oldType, newItem, newType);
+		// World Context System: same logic for events
+		if (newItem->isVisibleToAllContexts() || spectator->getWorldContextId() == itemContextId) {
+			spectator->onUpdateTileItem(static_self_cast<Tile>(), cylinderMapPos, oldItem, oldType, newItem, newType);
+		}
 	}
 }
 
@@ -600,6 +666,9 @@ ReturnValue Tile::queryAdd(int32_t, const std::shared_ptr<Thing> &thing, uint32_
 	}
 
 	if (const auto &creature = thing->getCreature()) {
+		// World Context System: Get creature's context for layer-aware checks
+		uint32_t creatureContext = creature->getWorldContextId();
+		
 		if (creature->getNpc()) {
 			const ReturnValue returnValue = checkNpcCanWalkIntoTile();
 			if (returnValue != RETURNVALUE_NOERROR) {
@@ -634,6 +703,11 @@ ReturnValue Tile::queryAdd(int32_t, const std::shared_ptr<Thing> &thing, uint32_
 							continue;
 						}
 
+						// World Context System: ignore creatures in different contexts
+						if (!monster->isInSameContext(tileCreature)) {
+							continue;
+						}
+
 						const auto &creatureMonster = tileCreature->getMonster();
 						if (!creatureMonster || !tileCreature->isPushable() || (creatureMonster->isSummon() && creatureMonster->getMaster()->getPlayer())) {
 							return RETURNVALUE_NOTPOSSIBLE;
@@ -642,6 +716,11 @@ ReturnValue Tile::queryAdd(int32_t, const std::shared_ptr<Thing> &thing, uint32_
 				}
 			} else if (creatures && !creatures->empty()) {
 				for (const auto &tileCreature : *creatures) {
+					// World Context System: ignore creatures in different contexts
+					if (!monster->isInSameContext(tileCreature)) {
+						continue;
+					}
+
 					if (!tileCreature->isInGhostMode()) {
 						return RETURNVALUE_NOTENOUGHROOM;
 					}
@@ -742,6 +821,11 @@ ReturnValue Tile::queryAdd(int32_t, const std::shared_ptr<Thing> &thing, uint32_
 			}
 		} else if (creatures && !creatures->empty() && !hasBitSet(FLAG_IGNOREBLOCKCREATURE, tileFlags)) {
 			for (const auto &tileCreature : *creatures) {
+				// World Context System: ignore creatures in different contexts
+				if (!creature->isInSameContext(tileCreature)) {
+					continue;
+				}
+
 				if (!tileCreature->isInGhostMode()) {
 					return RETURNVALUE_NOTENOUGHROOM;
 				}
@@ -749,8 +833,9 @@ ReturnValue Tile::queryAdd(int32_t, const std::shared_ptr<Thing> &thing, uint32_
 		}
 
 		if (!hasBitSet(FLAG_IGNOREBLOCKITEM, tileFlags)) {
+			// World Context System: Use context-aware flag check
 			// If the FLAG_IGNOREBLOCKITEM bit isn't set we dont have to iterate every single item
-			if (hasFlag(TILESTATE_BLOCKSOLID)) {
+			if (hasFlagForContext(TILESTATE_BLOCKSOLID, creatureContext)) {
 				// NO PVP magic wall or wild growth field check
 				if (creature && creature->getPlayer()) {
 					if (const auto fieldList = getItemList()) {
@@ -764,6 +849,9 @@ ReturnValue Tile::queryAdd(int32_t, const std::shared_ptr<Thing> &thing, uint32_
 						}
 					}
 				}
+				
+				g_logger().debug("[queryAdd] BLOCKSOLID detected for creature {} (ctx={}) at {}", 
+					creature->getName(), creatureContext, getPosition().toString());
 				return RETURNVALUE_NOTENOUGHROOM;
 			}
 		} else {
@@ -1440,6 +1528,8 @@ int32_t Tile::getStackposOfCreature(const std::shared_ptr<Player> &player, const
 
 int32_t Tile::getStackposOfItem(const std::shared_ptr<Player> &player, const std::shared_ptr<Item> &item) const {
 	int32_t n = 0;
+	uint32_t playerCtx = player->getWorldContextId();
+	
 	if (ground) {
 		if (ground == item) {
 			return n;
@@ -1451,16 +1541,52 @@ int32_t Tile::getStackposOfItem(const std::shared_ptr<Player> &player, const std
 	if (items) {
 		if (item->isAlwaysOnTop()) {
 			for (auto it = items->getBeginTopItem(), end = items->getEndTopItem(); it != end; ++it) {
-				if (*it == item) {
+				const auto &topItem = *it;
+				// Snapshot System: count items visible to player
+				uint32_t itemCtx = topItem->getWorldContextId();
+				bool visibleToAll = topItem->isVisibleToAllContexts();
+				
+				bool shouldCount = false;
+				if (playerCtx == 0) {
+					// Global context: count map items and global items
+					shouldCount = (visibleToAll || itemCtx == 0);
+				} else {
+					// Private context: ONLY count cloned items
+					shouldCount = (itemCtx == playerCtx);
+				}
+				
+				if (!shouldCount) {
+					continue;
+				}
+				
+				if (topItem == item) {
 					return n;
 				} else if (++n == 10) {
 					return -1;
 				}
 			}
 		} else {
-			n += items->getTopItemCount();
-			if (n >= 10) {
-				return -1;
+			// Count only visible top items
+			for (auto it = items->getBeginTopItem(), end = items->getEndTopItem(); it != end; ++it) {
+				const auto &topItem = *it;
+				// Snapshot System: count items visible to player
+				uint32_t itemCtx = topItem->getWorldContextId();
+				bool visibleToAll = topItem->isVisibleToAllContexts();
+				
+				bool shouldCount = false;
+				if (playerCtx == 0) {
+					// Global context: count map items and global items
+					shouldCount = (visibleToAll || itemCtx == 0);
+				} else {
+					// Private context: ONLY count cloned items
+					shouldCount = (itemCtx == playerCtx);
+				}
+				
+				if (shouldCount) {
+					if (++n >= 10) {
+						return -1;
+					}
+				}
 			}
 		}
 	}
@@ -1477,7 +1603,25 @@ int32_t Tile::getStackposOfItem(const std::shared_ptr<Player> &player, const std
 
 	if (items && !item->isAlwaysOnTop()) {
 		for (auto it = items->getBeginDownItem(), end = items->getEndDownItem(); it != end; ++it) {
-			if (*it == item) {
+			const auto &downItem = *it;
+			// Snapshot System: count items visible to player
+			uint32_t itemCtx = downItem->getWorldContextId();
+			bool visibleToAll = downItem->isVisibleToAllContexts();
+			
+			bool shouldCount = false;
+			if (playerCtx == 0) {
+				// Global context: count map items and global items
+				shouldCount = (visibleToAll || itemCtx == 0);
+			} else {
+				// Private context: ONLY count cloned items
+				shouldCount = (itemCtx == playerCtx);
+			}
+			
+			if (!shouldCount) {
+				continue;
+			}
+			
+			if (downItem == item) {
 				return n;
 			} else if (++n >= 10) {
 				return -1;
@@ -1540,6 +1684,90 @@ std::shared_ptr<Thing> Tile::getThing(size_t index) const {
 	if (items && index < items->getDownItemCount()) {
 		return items->at(index);
 	}
+	return nullptr;
+}
+
+std::shared_ptr<Thing> Tile::getThingForPlayer(const std::shared_ptr<Player> &player, size_t index) const {
+	if (!player) {
+		return getThing(index);
+	}
+	
+	uint32_t playerCtx = player->getWorldContextId();
+	
+	if (ground) {
+		if (index == 0) {
+			return ground;
+		}
+		--index;
+	}
+
+	const TileItemVector* items = getItemList();
+	if (items) {
+		// Count visible top items
+		uint32_t visibleTopCount = 0;
+		for (auto it = items->getBeginTopItem(), end = items->getEndTopItem(); it != end; ++it) {
+			const auto &item = *it;
+			// Players in private contexts should NOT see/interact with map items
+			bool shouldCount = false;
+			if (item->isVisibleToAllContexts()) {
+				shouldCount = (playerCtx == 0); // Only global context
+			} else {
+				shouldCount = (item->getWorldContextId() == playerCtx);
+			}
+			
+			if (shouldCount) {
+				if (index == visibleTopCount) {
+					return item;
+				}
+				++visibleTopCount;
+			}
+		}
+		
+		if (index < visibleTopCount) {
+			return nullptr; // Should not reach here
+		}
+		index -= visibleTopCount;
+	}
+
+	if (const CreatureVector* creatures = getCreatures()) {
+		uint32_t visibleCreatureCount = 0;
+		for (const auto &creature : *creatures) {
+			if (player->canSeeCreature(creature)) {
+				if (index == visibleCreatureCount) {
+					return creature;
+				}
+				++visibleCreatureCount;
+			}
+		}
+		
+		if (index < visibleCreatureCount) {
+			return nullptr; // Should not reach here
+		}
+		index -= visibleCreatureCount;
+	}
+
+	if (items) {
+		// Count visible down items
+		uint32_t visibleDownCount = 0;
+		for (auto it = items->getBeginDownItem(), end = items->getEndDownItem(); it != end; ++it) {
+			const auto &item = *it;
+			// Players in private contexts should NOT see/interact with map items
+			bool shouldCount = false;
+			if (item->isVisibleToAllContexts()) {
+				shouldCount = (playerCtx == 0); // Only global context
+			} else {
+				shouldCount = (item->getWorldContextId() == playerCtx);
+			}
+			
+			if (shouldCount) {
+				if (index == visibleDownCount) {
+					return item;
+				}
+				++visibleDownCount;
+			}
+		}
+	}
+	
 	return nullptr;
 }
 
@@ -1883,6 +2111,19 @@ std::shared_ptr<Item> Tile::getUseItem(int32_t index) const {
 	return nullptr;
 }
 
+std::shared_ptr<Item> Tile::getUseItem(const std::shared_ptr<Player> &player, int32_t index) const {
+	const TileItemVector* items = getItemList();
+	if (!items || items->empty()) {
+		return ground;
+	}
+
+	if (const auto &thing = getThingForPlayer(player, index)) {
+		return thing->getItem();
+	}
+
+	return nullptr;
+}
+
 std::shared_ptr<Item> Tile::getDoorItem() const {
 	const TileItemVector* items = getItemList();
 	if (!items || items->empty()) {
@@ -1957,4 +2198,111 @@ void Tile::safeCall(std::function<void(void)> &&action) const {
 	} else {
 		action();
 	}
+}
+
+void Tile::removeItemsByContext(uint32_t contextId) {
+	TileItemVector* items = getItemList();
+	if (!items) {
+		return;
+	}
+	
+	// Collect items to remove (can't remove while iterating)
+	std::vector<std::shared_ptr<Item>> itemsToRemove;
+	
+	for (const auto &item : *items) {
+		if (item->getWorldContextId() == contextId) {
+			itemsToRemove.push_back(item);
+		}
+	}
+	
+	// Remove collected items
+	for (const auto &item : itemsToRemove) {
+		removeThing(item, item->getItemCount());
+	}
+	
+	if (!itemsToRemove.empty()) {
+		g_logger().debug("[Tile] Removed {} items from context {} at {}", 
+			itemsToRemove.size(), contextId, getPosition().toString());
+	}
+}
+
+// ============================================================================
+// Layer-Aware Methods
+// ============================================================================
+
+std::vector<std::shared_ptr<Item>> Tile::getItemsForContext(uint32_t contextId) const {
+	std::vector<std::shared_ptr<Item>> visibleItems;
+	
+	// Get base items (from physical tile)
+	const auto* baseItems = getItemList();
+	if (baseItems) {
+		for (const auto& item : *baseItems) {
+			// In global context (0): show map items and global items
+			if (contextId == 0) {
+				if (item->isVisibleToAllContexts() || item->getWorldContextId() == 0) {
+					visibleItems.push_back(item);
+				}
+			} else {
+				// In private context: only show items from this context
+				// (map items are "hidden" for private contexts)
+				if (item->getWorldContextId() == contextId) {
+					visibleItems.push_back(item);
+				}
+			}
+		}
+	}
+	
+	// Add ground if in global context
+	if (contextId == 0 && ground) {
+		// Ground is always at position 0, but we're iterating items only
+		// Ground is handled separately in protocol
+	}
+	
+	// Get layer overrides (cloned items for this context)
+	if (contextId != 0) {
+		// Create explicit copy since tilePos is accessed from const method
+		const Position layerPos(tilePos.x, tilePos.y, tilePos.z);
+		auto* layer = TileLayerManager::getInstance().getLayer(layerPos, contextId);
+		if (layer) {
+			// Add cloned items from layer
+			for (const auto& item : layer->clonedItems) {
+				visibleItems.push_back(item);
+			}
+		}
+	}
+	
+	return visibleItems;
+}
+
+bool Tile::hasFlagForContext(TileFlags_t flag, uint32_t contextId) const {
+	// Check ground first
+	if (ground) {
+		const ItemType& it = Item::items[ground->getID()];
+		if (flag == TILESTATE_BLOCKSOLID && it.blockSolid) {
+			// Ground is always visible (part of map)
+			if (contextId == 0) {
+				return true;
+			}
+			// In private contexts, ground doesn't block (it's "virtual")
+		}
+	}
+	
+	// Check visible items only
+	auto visibleItems = getItemsForContext(contextId);
+	for (const auto& item : visibleItems) {
+		const ItemType& it = Item::items[item->getID()];
+		
+		// Check common flags
+		if (flag == TILESTATE_BLOCKSOLID && it.blockSolid) {
+			return true;
+		}
+		if (flag == TILESTATE_BLOCKPATH && it.blockPathFind) {
+			return true;
+		}
+		if (flag == TILESTATE_BLOCKPROJECTILE && it.blockProjectile) {
+			return true;
+		}
+	}
+	
+	return false;
 }

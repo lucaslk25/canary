@@ -2,12 +2,22 @@
  * Canary - A free and open-source MMORPG server emulator
  * Copyright (©) 2019–present OpenTibiaBR <opentibiabr@outlook.com>
  * Repository: https://github.com/opentibiabr/canary
- * License: https://github.com/opentibiabr/canary/blob/main/LICENSE
- * Contributors: https://github.com/opentibiabr/canary/graphs/contributors
+ * License: https://github.com/opentibiabr/canary/graphs/contributors
  * Website: https://docs.opentibiabr.com/
  */
 
 #pragma once
+
+/**
+ * @brief Priority levels for item cloning in instanced contexts.
+ * Used by snapshot system to determine which items to clone eagerly vs lazily.
+ */
+enum class ItemPriority : uint8_t {
+	CRITICAL,    // Doors, walls, stairs - affects gameplay/movement
+	IMPORTANT,   // Fixed containers, teleports - should be cloned
+	DECORATIVE,  // Flowers, stones - can be cloned lazily
+	IGNORE       // Temporary effects - never clone
+};
 
 #include "enums/item_attribute.hpp"
 #include "io/fileloader.hpp"
@@ -259,6 +269,30 @@ public:
 
 	bool getIsLootTrackeable() const {
 		return isLootTrackeable;
+	}
+
+	// World Context System: context-aware item visibility
+	// Use UINT32_MAX to indicate "no context" (visible to all - for map items)
+	// contextId 0 = global gameplay context
+	// contextId > 0 = private instance context
+	static constexpr uint32_t CONTEXT_VISIBLE_TO_ALL = UINT32_MAX;
+
+	void setWorldContextId(uint32_t contextId) {
+		// Always set the attribute so we can distinguish between
+		// "context 0" and "no context set" (map items)
+		setAttribute(ItemAttribute_t::WORLDCONTEXTID, contextId);
+	}
+
+	uint32_t getWorldContextId() const {
+		if (!hasAttribute(ItemAttribute_t::WORLDCONTEXTID)) {
+			// Item has no context set - it's a map item, visible to all
+			return CONTEXT_VISIBLE_TO_ALL;
+		}
+		return getAttribute<uint32_t>(ItemAttribute_t::WORLDCONTEXTID);
+	}
+
+	bool isVisibleToAllContexts() const {
+		return getWorldContextId() == CONTEXT_VISIBLE_TO_ALL;
 	}
 
 	void setOwner(uint32_t owner) {
@@ -763,4 +797,47 @@ private:
 
 using ItemList = std::list<std::shared_ptr<Item>>;
 using ItemDeque = std::deque<std::shared_ptr<Item>>;
+
+/**
+ * @brief Determines the priority of an item for context snapshot cloning.
+ * 
+ * CRITICAL items (doors, walls, stairs) must be cloned immediately to ensure
+ * gameplay functionality. DECORATIVE items can be cloned lazily.
+ * 
+ * @param item The item to evaluate
+ * @return ItemPriority level for snapshot system
+ */
+inline ItemPriority getItemPriority(const std::shared_ptr<Item> &item) {
+	if (!item) {
+		return ItemPriority::IGNORE;
+	}
+	
+	const ItemType &it = Item::items[item->getID()];
+	
+	// CRITICAL: Affects gameplay/movement
+	if (it.blockSolid || it.blockProjectile) {
+		return ItemPriority::CRITICAL;  // Walls, barriers
+	}
+	if (it.isDoor()) {
+		return ItemPriority::CRITICAL;  // Doors
+	}
+	if (it.isTeleport()) {
+		return ItemPriority::CRITICAL;  // Teleports
+	}
+	if (item->getTeleport()) {
+		return ItemPriority::CRITICAL;  // Teleport items
+	}
+	
+	// IMPORTANT: Fixed containers
+	if (it.type == ITEM_TYPE_CONTAINER && !it.pickupable) {
+		return ItemPriority::IMPORTANT;
+	}
+	
+	// DECORATIVE: Everything else
+	if (it.isGroundTile() || it.alwaysOnTopOrder > 0) {
+		return ItemPriority::DECORATIVE;
+	}
+	
+	return ItemPriority::IGNORE;
+}
 using StashContainerList = std::vector<std::pair<std::shared_ptr<Item>, uint32_t>>;

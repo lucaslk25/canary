@@ -28,6 +28,7 @@
 #include "enums/account_errors.hpp"
 #include "enums/account_group_type.hpp"
 #include "enums/account_type.hpp"
+#include "game/world_context/context_manager.hpp"
 #include "enums/object_category.hpp"
 #include "enums/player_blessings.hpp"
 #include "enums/player_icons.hpp"
@@ -1332,11 +1333,24 @@ bool Player::canSeeCreature(const std::shared_ptr<Creature> &creature) const {
 	if (!creature->getPlayer() && !canSeeInvisibility() && creature->isInvisible()) {
 		return false;
 	}
+
+	// World Context System: creatures in different contexts are invisible to each other
+	// Context 0 (global) sees only context 0 creatures
+	// Context N (private) sees only context N creatures
+	if (!isInSameContext(creature)) {
+		return false;
+	}
+
 	return true;
 }
 
 bool Player::canWalkthrough(const std::shared_ptr<Creature> &creature) {
 	if (group->access || creature->isInGhostMode()) {
+		return true;
+	}
+
+	// World Context System: creatures in different contexts don't block each other
+	if (!isInSameContext(creature)) {
 		return true;
 	}
 
@@ -2728,6 +2742,8 @@ void Player::onWalk(Direction &dir) {
 	setNextActionTask(nullptr);
 
 	g_callbacks().executeCallback(EventCallback_t::playerOnWalk, getPlayer(), dir);
+	
+	// World Context System: TODO - Add cloning logic later
 }
 
 void Player::checkTradeState(const std::shared_ptr<Item> &item) {
@@ -6786,7 +6802,12 @@ void Player::updateBaseSpeed() {
 	const uint16_t maxSpeed = hasFlag(PlayerFlags_t::SetMaxSpeed) ? PLAYER_MAX_STAFF_SPEED : PLAYER_MAX_SPEED;
 	if (!hasFlag(PlayerFlags_t::SetMaxSpeed)) {
 		const uint32_t computedSpeed = vocation->getBaseSpeed() + (level - 1);
-		baseSpeed = static_cast<uint16_t>(std::min<uint32_t>(computedSpeed, maxSpeed));
+		// For god group, set default speed to 1500 instead of calculated speed
+		if (group && group->id == GROUP_TYPE_GOD) {
+			baseSpeed = PLAYER_MAX_STAFF_SPEED;
+		} else {
+			baseSpeed = static_cast<uint16_t>(std::min<uint32_t>(computedSpeed, maxSpeed));
+		}
 	} else {
 		baseSpeed = maxSpeed;
 	}
@@ -8174,6 +8195,18 @@ void Player::sendUpdateTile(const std::shared_ptr<Tile> &updateTile, const Posit
 	}
 }
 
+void Player::sendMapDescription(const Position &pos) const {
+	if (client) {
+		client->sendMapDescription(pos);
+	}
+}
+
+void Player::sendContextSwitch(uint32_t contextId) const {
+	if (client) {
+		client->sendContextSwitch(contextId);
+	}
+}
+
 void Player::sendChannelMessage(const std::string &author, const std::string &text, SpeakClasses type, uint16_t channel) const {
 	if (client) {
 		client->sendChannelMessage(author, text, type, channel);
@@ -8191,6 +8224,11 @@ void Player::sendCreatureAppear(const std::shared_ptr<Creature> &creature, const
 		return;
 	}
 
+	// World Context System: don't send creature to client if in different context
+	if (!canSeeCreature(creature)) {
+		return;
+	}
+
 	auto tile = creature->getTile();
 	if (!tile) {
 		return;
@@ -8202,6 +8240,11 @@ void Player::sendCreatureAppear(const std::shared_ptr<Creature> &creature, const
 }
 
 void Player::sendCreatureMove(const std::shared_ptr<Creature> &creature, const Position &newPos, int32_t newStackPos, const Position &oldPos, int32_t oldStackPos, bool teleport) const {
+	// World Context System: don't send creature movement if in different context
+	if (!canSeeCreature(creature)) {
+		return;
+	}
+
 	if (client) {
 		client->sendMoveCreature(creature, newPos, newStackPos, oldPos, oldStackPos, teleport);
 	}

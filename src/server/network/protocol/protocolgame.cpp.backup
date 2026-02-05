@@ -33,7 +33,6 @@
 #include "game/game.hpp"
 #include "game/modal_window/modal_window.hpp"
 #include "game/scheduling/dispatcher.hpp"
-#include "game/world_context/tile_layer_manager.hpp"
 #include "io/functions/iologindata_load_player.hpp"
 #include "io/io_bosstiary.hpp"
 #include "io/iobestiary.hpp"
@@ -1468,85 +1467,26 @@ void ProtocolGame::GetTileDescription(const std::shared_ptr<Tile> &tile, Network
 		msg.add<uint16_t>(0x00); // Env effects
 	}
 
-	// Use this->player directly
-	int32_t count = 0;
-	uint32_t playerCtx = player->getWorldContextId();
-	
-	// DIAGNOSTIC: Always log first tile to verify code is running
-	static bool firstTileLogged = false;
-	if (!firstTileLogged) {
-		g_logger().info(">>> DIAGNOSTIC: GetTileDescription code is RUNNING (new version)");
-		firstTileLogged = true;
-	}
-	
-	// DIAGNOSTIC: Log every tile for context 1
-	if (playerCtx == 1) {
-		g_logger().info(">>> GetTile: pos={}, playerCtx={}", 
-			tile->getPosition().toString(), playerCtx);
-	}
-	
-	// Layer System: Check if context has a cloned ground in its layer
-	std::shared_ptr<Item> groundToSend = nullptr;
-	
-	if (playerCtx != 0) {
-		g_logger().info(">>> ENTERED private context branch (playerCtx={})", playerCtx);
-		
-		// Private context: look for cloned ground in layer
-		const Position& tilePos = tile->getPosition();
-		auto* layer = TileLayerManager::getInstance().getLayer(tilePos, playerCtx);
-		
-		g_logger().info(">>> Layer lookup: ctx={}, pos={}, result={}", 
-			playerCtx, tilePos.toString(), layer ? "FOUND" : "NOT_FOUND");
-		
-		if (layer) {
-			g_logger().info(">>> Layer has {} cloned items", layer->clonedItems.size());
-			
-			// Find ground item in cloned items (ground is always first if present)
-			for (const auto& item : layer->clonedItems) {
-				const ItemType& it = Item::items[item->getID()];
-				if (it.isGroundTile()) {
-					g_logger().info(">>> Found cloned ground: {} (id={})", 
-						item->getName(), item->getID());
-					groundToSend = item;
-					break;
-				}
-			}
-		}
-	} else {
-		g_logger().info(">>> Using GLOBAL context (playerCtx=0)");
-	}
-	
-	if (!groundToSend) {
-		// Global context or no cloned ground: use original ground
-		groundToSend = tile->getGround();
-		if (playerCtx != 0) {
-			g_logger().info(">>> No cloned ground found, using original: {}", 
-				groundToSend ? groundToSend->getName() : "NULL");
-		}
-	}
-	
-	if (groundToSend) {
-		AddItem(msg, groundToSend);
+	int32_t count;
+	std::shared_ptr<Item> ground = tile->getGround();
+	if (ground) {
+		AddItem(msg, ground);
 		count = 1;
+	} else {
+		count = 0;
 	}
 
-	// Get layer-aware items for this player's context
-	auto visibleItems = tile->getItemsForContext(playerCtx);
-	g_logger().debug("[GetTileDescription] Visible items for ctx {}: {} items", 
-		playerCtx, visibleItems.size());
-	
-	// Send top items
-	for (const auto& item : visibleItems) {
-		if (!item->isAlwaysOnTop()) {
-			continue; // Skip down items for now
-		}
-		
-		AddItem(msg, item);
-		count++;
-		if (count == 9 && tile->getPosition() == player->getPosition()) {
-			break;
-		} else if (count == 10) {
-			return;
+	const TileItemVector* items = tile->getItemList();
+	if (items) {
+		for (auto it = items->getBeginTopItem(), end = items->getEndTopItem(); it != end; ++it) {
+			AddItem(msg, *it);
+
+			count++;
+			if (count == 9 && tile->getPosition() == player->getPosition()) {
+				break;
+			} else if (count == 10) {
+				return;
+			}
 		}
 	}
 
@@ -1580,20 +1520,16 @@ void ProtocolGame::GetTileDescription(const std::shared_ptr<Tile> &tile, Network
 		}
 	}
 
-	// Send down items
-	for (const auto& item : visibleItems) {
-		if (item->isAlwaysOnTop()) {
-			continue; // Skip top items (already sent)
-		}
-		
-		AddItem(msg, item);
+	if (items) {
+		for (auto it = items->getBeginDownItem(), end = items->getEndDownItem(); it != end; ++it) {
+			AddItem(msg, *it);
 
-		if (++count == 10) {
-			return;
+			if (++count == 10) {
+				return;
+			}
 		}
 	}
 }
-
 
 void ProtocolGame::GetMapDescription(int32_t x, int32_t y, int32_t z, int32_t width, int32_t height, NetworkMessage &msg) {
 	int32_t skip = -1;
@@ -6830,16 +6766,6 @@ void ProtocolGame::sendMagicEffect(const Position &pos, uint16_t type) {
 	writeToOutputBuffer(msg);
 }
 
-void ProtocolGame::sendContextSwitch(uint32_t contextId) {
-	// Clear known creatures - client will receive fresh creature data in MapDescription
-	knownCreatureSet.clear();
-	
-	NetworkMessage msg;
-	msg.addByte(0x39);
-	msg.add<uint32_t>(contextId);
-	writeToOutputBuffer(msg);
-}
-
 void ProtocolGame::removeMagicEffect(const Position &pos, uint16_t type) {
 	if (oldProtocol && type > 0xFF) {
 		return;
@@ -7291,35 +7217,7 @@ void ProtocolGame::sendAddCreature(const std::shared_ptr<Creature> &creature, co
 }
 
 void ProtocolGame::sendMoveCreature(const std::shared_ptr<Creature> &creature, const Position &newPos, int32_t newStackPos, const Position &oldPos, int32_t oldStackPos, bool teleport) {
-	// During context switch, block ALL creature movements except player itself
-	// This prevents race condition where creature moves are queued before context switch
-	// but sent after, causing "creature not found" errors on client
-	if (player->needsContextRefresh()) {
-		if (creature != player) {
-			// Block all other creature movements during context transition
-			return;
-		}
-		// Player's first movement after context switch - send as teleport/map refresh
-		g_logger().info("[sendMoveCreature] Context refresh - sending MapDescription for {}", newPos.toString());
-		player->setNeedsContextRefresh(false);
-		sendMapDescription(newPos);
-		return;
-	}
-	
-	// Normal context filtering (after transition is complete)
-	if (creature != player && creature->getWorldContextId() != player->getWorldContextId()) {
-		g_logger().debug("[sendMoveCreature] BLOCKED (context): {} ctx={} player ctx={}", 
-			creature->getName(), creature->getWorldContextId(), player->getWorldContextId());
-		return;
-	}
-	
-	// Log all movements being sent
-	g_logger().debug("[sendMoveCreature] SENDING: {} from {} to {} (ctx={}, isPlayer={})", 
-		creature->getName(), oldPos.toString(), newPos.toString(), 
-		creature->getWorldContextId(), creature == player);
-	
 	if (creature == player) {
-		
 		if (oldStackPos >= 10) {
 			sendMapDescription(newPos);
 		} else if (teleport) {

@@ -964,7 +964,9 @@ void Combat::combatTileEffects(const CreatureVector &spectators, const std::shar
 	}
 
 	if (params.impactEffect != CONST_ME_NONE) {
-		Game::addMagicEffect(spectators, tile->getPosition(), params.impactEffect);
+		// World Context System: use caster's context for effect visibility
+		uint32_t contextId = caster ? caster->getWorldContextId() : 0;
+		Game::addMagicEffect(spectators, tile->getPosition(), params.impactEffect, contextId);
 	}
 
 	if (params.soundImpactEffect != SoundEffect_t::SILENCE) {
@@ -1022,11 +1024,13 @@ void Combat::addDistanceEffect(const std::shared_ptr<Creature> &caster, const Po
 	}
 
 	if (effect != CONST_ANI_NONE) {
-		g_game().addDistanceEffect(fromPos, toPos, effect);
+		// World Context System: use caster's context for effect visibility
+		uint32_t contextId = caster ? caster->getWorldContextId() : 0;
+		g_game().addDistanceEffect(fromPos, toPos, effect, contextId);
 	}
 }
 
-void Combat::doChainEffect(const Position &origin, const Position &dest, uint8_t effect) {
+void Combat::doChainEffect(const Position &origin, const Position &dest, uint8_t effect, uint32_t contextId) {
 	if (effect > 0) {
 		std::vector<Direction> dirList;
 
@@ -1038,10 +1042,10 @@ void Combat::doChainEffect(const Position &origin, const Position &dest, uint8_t
 		if (g_game().map.getPathMatching(origin, dirList, FrozenPathingConditionCall(dest), fpp)) {
 			for (const auto &dir : dirList) {
 				pos = getNextPosition(dir, pos);
-				g_game().addMagicEffect(pos, effect);
+				g_game().addMagicEffect(pos, effect, contextId);
 			}
 		}
-		g_game().addMagicEffect(dest, effect);
+		g_game().addMagicEffect(dest, effect, contextId);
 	}
 }
 
@@ -1149,15 +1153,17 @@ bool Combat::doCombatChain(const std::shared_ptr<Creature> &caster, const std::s
 			if (!nextTarget) {
 				continue;
 			}
-			g_dispatcher().scheduleEvent(
-				delay, [combat, caster, nextTarget, from, affected]() {
-					if (combat && caster && nextTarget) {
-						Combat::doChainEffect(from, nextTarget->getPosition(), combat->params.chainEffect);
-						combat->doCombat(caster, nextTarget, from, affected);
-					}
-				},
-				"Combat::doCombatChain"
-			);
+		g_dispatcher().scheduleEvent(
+			delay, [combat, caster, nextTarget, from, affected]() {
+				if (combat && caster && nextTarget) {
+					// World Context System: use caster's context for chain effect visibility
+					uint32_t contextId = caster->getWorldContextId();
+					Combat::doChainEffect(from, nextTarget->getPosition(), combat->params.chainEffect, contextId);
+					combat->doCombat(caster, nextTarget, from, affected);
+				}
+			},
+			"Combat::doCombatChain"
+		);
 		}
 	}
 
@@ -1354,7 +1360,9 @@ void Combat::doCombatHealth(const std::shared_ptr<Creature> &caster, const std::
 	if ((caster && target)
 	    && (caster == target || canCombat)
 	    && (params.impactEffect != CONST_ME_NONE)) {
-		g_game().addMagicEffect(target->getPosition(), params.impactEffect);
+		// World Context System: use caster's context for effect visibility
+		uint32_t contextId = caster ? caster->getWorldContextId() : 0;
+		g_game().addMagicEffect(target->getPosition(), params.impactEffect, contextId);
 	}
 
 	if (target && params.combatType == COMBAT_HEALING && target->getMonster()) {
@@ -1399,7 +1407,9 @@ void Combat::doCombatMana(const std::shared_ptr<Creature> &caster, const std::sh
 	if ((caster && target)
 	    && (caster == target || canCombat)
 	    && (params.impactEffect != CONST_ME_NONE)) {
-		g_game().addMagicEffect(target->getPosition(), params.impactEffect);
+		// World Context System: use caster's context for effect visibility
+		uint32_t contextId = caster ? caster->getWorldContextId() : 0;
+		g_game().addMagicEffect(target->getPosition(), params.impactEffect, contextId);
 	}
 
 	std::vector<std::shared_ptr<Creature>> affectedTargets;
@@ -1437,7 +1447,9 @@ void Combat::doCombatCondition(const std::shared_ptr<Creature> &caster, const Po
 void Combat::doCombatCondition(const std::shared_ptr<Creature> &caster, const std::shared_ptr<Creature> &target, const CombatParams &params) {
 	bool canCombat = !params.aggressive || (caster != target && Combat::canDoCombat(caster, target, params.aggressive) == RETURNVALUE_NOERROR);
 	if ((caster == target || canCombat) && params.impactEffect != CONST_ME_NONE) {
-		g_game().addMagicEffect(target->getPosition(), params.impactEffect);
+		// World Context System: use caster's context for effect visibility
+		uint32_t contextId = caster ? caster->getWorldContextId() : 0;
+		g_game().addMagicEffect(target->getPosition(), params.impactEffect, contextId);
 	}
 
 	if (canCombat) {
@@ -1468,7 +1480,9 @@ void Combat::doCombatDispel(const std::shared_ptr<Creature> &caster, const std::
 	if ((caster && target)
 	    && (caster == target || canCombat)
 	    && (params.impactEffect != CONST_ME_NONE)) {
-		g_game().addMagicEffect(target->getPosition(), params.impactEffect);
+		// World Context System: use caster's context for effect visibility
+		uint32_t contextId = caster ? caster->getWorldContextId() : 0;
+		g_game().addMagicEffect(target->getPosition(), params.impactEffect, contextId);
 	}
 
 	if (canCombat) {

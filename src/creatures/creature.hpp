@@ -123,6 +123,40 @@ public:
 	uint32_t getID() const {
 		return id;
 	}
+
+	// === World Context System (Instanced Hunts) ===
+	// Context ID 0 = global shared world
+	// Context ID 1+ = private instances
+	
+	uint32_t getWorldContextId() const {
+		return m_worldContextId;
+	}
+	
+	void setWorldContextId(uint32_t contextId) {
+		m_worldContextId = contextId;
+	}
+	
+	bool isInSameContext(const std::shared_ptr<Creature> &other) const {
+		return other && m_worldContextId == other->getWorldContextId();
+	}
+	
+	bool isInGlobalContext() const {
+		return m_worldContextId == 0;
+	}
+	
+	bool isInPrivateContext() const {
+		return m_worldContextId != 0;
+	}
+	
+	// Flag to indicate player just switched context and needs teleport-style movement
+	bool needsContextRefresh() const {
+		return m_needsContextRefresh;
+	}
+	
+	void setNeedsContextRefresh(bool value) {
+		m_needsContextRefresh = value;
+	}
+
 	virtual void removeList() = 0;
 	virtual void addList() = 0;
 
@@ -762,6 +796,8 @@ protected:
 
 	uint64_t lastStep = 0;
 	uint32_t id = 0;
+	uint32_t m_worldContextId = 0; // 0 = global, 1+ = private instance
+	bool m_needsContextRefresh = false; // True after context switch, reset after first move
 	uint32_t scriptEventsBitField = 0;
 	uint32_t eventWalk = 0;
 	uint32_t walkUpdateTicks = 0;

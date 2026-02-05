@@ -48,6 +48,13 @@ public:
 		return find(centerPos, multifloor, onlyPlayers, onlyMonsters, onlyNpcs, minRangeX, maxRangeX, minRangeY, maxRangeY, useCache);
 	}
 
+	/**
+	 * @brief Filters spectators to only include those in the same world context
+	 * @param contextId The world context ID to filter by (0 = global, sees all global)
+	 * @return A new Spectators object with only creatures in the same context
+	 */
+	Spectators filterByContext(uint32_t contextId) const;
+
 	template <typename T>
 		requires std::is_base_of_v<Creature, T>
 	Spectators filter() const {
