@@ -400,6 +400,10 @@ void Map::moveCreature(const std::shared_ptr<Creature> &creature, const std::sha
 		if (spec->canSeeCreature(creature)) {
 			oldStackPosVector.push_back(oldTile->getClientIndexOfCreature(spec->getPlayer(), creature));
 		} else {
+			// Movement blocked due to context mismatch
+			g_logger().debug("[Map::moveCreature] FILTERED: {} (ctx={}) for spectator {} (ctx={})", 
+				creature->getName(), creature->getWorldContextId(), 
+				spec->getName(), spec->getWorldContextId());
 			oldStackPosVector.push_back(-1);
 		}
 	}

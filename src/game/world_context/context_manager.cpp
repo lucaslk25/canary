@@ -10,7 +10,10 @@
 #include "game/game.hpp"
 #include "game/scheduling/dispatcher.hpp"
 #include "game/world_context/tile_layer_manager.hpp"
+#include "map/spectators.hpp"
 #include "utils/tools.hpp"
+
+#include <algorithm>
 
 // ============================================================================
 // WorldContext
@@ -57,19 +60,20 @@ uint32_t ContextManager::createContext(const std::shared_ptr<Player> &owner) {
 	g_logger().info("[ContextManager] Created context {} (owner: '{}', active: {})", 
 		newId, ownerName, m_activeCount.load());
 	
-	// Pre-warm context with basic tiles (minimal approach)
-	if (owner) {
-		prewarmContext(newId, owner->getPosition());
-	}
+	// NOTE: Pre-warm disabled - using fallback system instead
+	// The fallback in getItemsForContext shows context 0 items as base map
+	// This avoids desync between cloned items and real tile items
+	// if (owner) {
+	// 	prewarmContext(newId, owner->getPosition());
+	// }
 
 	return newId;
 }
 
 void ContextManager::prewarmContext(uint32_t contextId, const Position &centerPos) {
-	// Baby step: Clone ground tiles using TileLayerManager
-	// Multi-floor: Clone 3 floors (Z-1, Z, Z+1) to cover stairs/holes
-	constexpr int RADIUS = 10; // Increased from 5 to 10 (21x21 tiles per floor)
-	constexpr int FLOOR_RANGE = 1; // Clone 1 floor above and below
+	// Clone ALL items from tiles - complete map snapshot for the context
+	constexpr int RADIUS = 20; // 41x41 tiles per floor (increased from 10)
+	constexpr int FLOOR_RANGE = 2; // Clone 2 floors above and below
 	
 	g_logger().info("[ContextManager] Pre-warming context {} at ({}, {}, {}) radius {} (3 floors)",
 		contextId, centerPos.x, centerPos.y, centerPos.z, RADIUS);
@@ -102,7 +106,7 @@ void ContextManager::prewarmContext(uint32_t contextId, const Position &centerPo
 				tilesFound++;
 				tilesThisFloor++;
 				
-				// Clone ground and walls (critical items)
+				// Create layer for this tile
 				auto layer = TileLayerManager::getInstance().getOrCreateLayer(pos, contextId);
 				if (!layer) {
 					continue;
@@ -116,12 +120,12 @@ void ContextManager::prewarmContext(uint32_t contextId, const Position &centerPo
 					itemsCloned++;
 				}
 				
-				// Clone walls/doors (items with BLOCKSOLID flag)
+				// Clone ALL items from the tile (complete snapshot)
 				const auto& items = tile->getItemList();
 				if (items) {
 					for (const auto& item : *items) {
-						if (item->hasProperty(CONST_PROP_BLOCKSOLID) || 
-						    item->hasProperty(CONST_PROP_BLOCKPATH)) {
+						// Clone all map items (context 0)
+						if (item->getWorldContextId() == 0) {
 							auto clone = item->clone();
 							clone->setWorldContextId(contextId);
 							layer->clonedItems.push_back(clone);
@@ -196,15 +200,126 @@ void ContextManager::movePlayerToContext(const std::shared_ptr<Player> &player, 
 
 	g_logger().info("[Context] Player '{}': {} -> {}", player->getName(), currentContextId, targetContextId);
 
-	// 1. Mark player as needing refresh (will cause next moves to be sent as teleport)
-	player->setNeedsContextRefresh(true);
+	Position originalPos = player->getPosition();
+	auto playerTile = player->getTile();
+	if (!playerTile) {
+		return;
+	}
 
-	// 2. Update player's context ID
+	// ========================================================================
+	// PHASE 1: Collect all information BEFORE any changes
+	// ========================================================================
+
+	// 1a. Find players in old context (they need to stop seeing the switching player)
+	//     and players in new context (they need to start seeing the switching player)
+	struct SpectatorRemoveInfo {
+		std::shared_ptr<Player> spectator;
+		int32_t stackpos;
+	};
+	std::vector<SpectatorRemoveInfo> oldContextPlayerRemoves;
+	std::vector<std::shared_ptr<Player>> newContextSpectators;
+
+	auto allPlayerSpectators = Spectators().find<Player>(originalPos, true);
+	for (const auto &spectator : allPlayerSpectators) {
+		if (spectator == player) continue;
+		auto specPlayer = spectator->getPlayer();
+		if (!specPlayer) continue;
+
+		if (specPlayer->getWorldContextId() == currentContextId) {
+			int32_t stackpos = playerTile->getStackposOfCreature(specPlayer, player);
+			oldContextPlayerRemoves.push_back({specPlayer, stackpos});
+			g_logger().info("[Context] Old spectator {} sees {} at stackpos {}",
+				specPlayer->getName(), player->getName(), stackpos);
+		} else if (specPlayer->getWorldContextId() == targetContextId) {
+			newContextSpectators.push_back(specPlayer);
+		}
+	}
+
+	// 1b. Find ALL creatures visible to the switching player in their current context
+	//     These need to be explicitly removed from the player's CLIENT before switching
+	//     Without this, the client keeps old creature sprites cached (causing "clones")
+	struct CreatureOnTile {
+		Position pos;
+		int32_t stackpos;
+	};
+	std::vector<CreatureOnTile> creaturesToRemoveFromPlayer;
+
+	auto allCreatures = Spectators().find<Creature>(originalPos, true);
+	for (const auto &creature : allCreatures) {
+		if (creature == player) continue;
+		if (!player->canSeeCreature(creature)) continue;
+
+		auto creatureTile = creature->getTile();
+		if (!creatureTile) continue;
+
+		int32_t stackpos = creatureTile->getStackposOfCreature(player, creature);
+		if (stackpos >= 0) {
+			creaturesToRemoveFromPlayer.push_back({creature->getPosition(), stackpos});
+			g_logger().info("[Context] Will remove creature at pos={} stackpos={} from {}'s client",
+				creature->getPosition().toString(), stackpos, player->getName());
+		}
+	}
+
+	// Sort: same position -> remove highest stackpos first (so lower stackpos stays valid)
+	std::sort(creaturesToRemoveFromPlayer.begin(), creaturesToRemoveFromPlayer.end(),
+		[](const CreatureOnTile &a, const CreatureOnTile &b) {
+			if (a.pos.x != b.pos.x) return a.pos.x < b.pos.x;
+			if (a.pos.y != b.pos.y) return a.pos.y < b.pos.y;
+			if (a.pos.z != b.pos.z) return a.pos.z < b.pos.z;
+			return a.stackpos > b.stackpos; // Same pos: highest stackpos first
+		});
+
+	g_logger().info("[Context] Removing {} creatures from {}'s client, {} old spectators, {} new spectators",
+		creaturesToRemoveFromPlayer.size(), player->getName(),
+		oldContextPlayerRemoves.size(), newContextSpectators.size());
+
+	// ========================================================================
+	// PHASE 2: Send REMOVE packets BEFORE context change
+	// ========================================================================
+
+	// 2a. Remove all visible creatures from the SWITCHING PLAYER's client
+	//     This is the key fix: prevents cached creature sprites ("clones" and "lingering names")
+	for (const auto &info : creaturesToRemoveFromPlayer) {
+		player->sendRemoveTileThing(info.pos, info.stackpos);
+	}
+
+	// 2b. Remove switching player from OLD context spectators' clients (with poff effect)
+	for (const auto &info : oldContextPlayerRemoves) {
+		if (info.stackpos >= 0) {
+			info.spectator->sendMagicEffect(originalPos, CONST_ME_POFF);
+			info.spectator->sendRemoveTileThing(originalPos, info.stackpos);
+		}
+	}
+
+	// ========================================================================
+	// PHASE 3: Switch context
+	// ========================================================================
 	player->setWorldContextId(targetContextId);
-	
-	// 3. Send context switch packet (clears client creatures)
+
+	// ========================================================================
+	// PHASE 4: Rebuild switching player's view
+	// ========================================================================
+
+	// 4a. Send context switch packet (clears server-side knownCreatureSet)
 	player->sendContextSwitch(targetContextId);
-	
-	// 4. Send fresh map description
-	player->sendMapDescription(player->getPosition());
+
+	// 4b. Send full map description (opcode 0x64) to rebuild the entire client map
+	//     This replaces the old 1-tile teleport which only sent partial map updates
+	//     Combined with m_mapKnown=false from sendContextSwitch, this forces full rebuild
+	player->sendMapDescription(originalPos);
+
+	// 4c. Avatar appear effect for the switching player (arriving in new context)
+	player->sendMagicEffect(originalPos, CONST_ME_AVATAR_APPEAR);
+
+	// ========================================================================
+	// PHASE 5: Make switching player APPEAR for new context spectators
+	// ========================================================================
+	for (const auto &specPlayer : newContextSpectators) {
+		g_logger().info("[Context] Sending creature appear to {} for {}",
+			specPlayer->getName(), player->getName());
+		// Must forget first so server sends full creature data (opcode 0x61), not update (0x62)
+		specPlayer->forgetCreature(player);
+		specPlayer->sendCreatureAppear(player, originalPos, false);
+		specPlayer->sendMagicEffect(originalPos, CONST_ME_AVATAR_APPEAR);
+	}
 }

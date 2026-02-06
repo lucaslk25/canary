@@ -6577,6 +6577,12 @@ void Player::sendRemoveTileThing(const Position &pos, int32_t stackpos) const {
 	}
 }
 
+void Player::forgetCreature(const std::shared_ptr<Creature> &creature) {
+	if (client && creature) {
+		client->forgetCreature(creature->getID());
+	}
+}
+
 void Player::sendUpdateTileCreature(const std::shared_ptr<Creature> &creature) {
 	if (client) {
 		client->sendUpdateTileCreature(creature->getPosition(), creature->getTile()->getClientIndexOfCreature(static_self_cast<Player>(), creature), creature);
@@ -8242,8 +8248,13 @@ void Player::sendCreatureAppear(const std::shared_ptr<Creature> &creature, const
 void Player::sendCreatureMove(const std::shared_ptr<Creature> &creature, const Position &newPos, int32_t newStackPos, const Position &oldPos, int32_t oldStackPos, bool teleport) const {
 	// World Context System: don't send creature movement if in different context
 	if (!canSeeCreature(creature)) {
+		g_logger().debug("[sendCreatureMove] BLOCKED: {} (ctx={}) for player {} (ctx={})", 
+			creature->getName(), creature->getWorldContextId(), getName(), getWorldContextId());
 		return;
 	}
+
+	g_logger().debug("[sendCreatureMove] SENDING: {} from {} to {} (oldStack={}, newStack={})", 
+		creature->getName(), oldPos.toString(), newPos.toString(), oldStackPos, newStackPos);
 
 	if (client) {
 		client->sendMoveCreature(creature, newPos, newStackPos, oldPos, oldStackPos, teleport);

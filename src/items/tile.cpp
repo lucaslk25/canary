@@ -1479,9 +1479,13 @@ int32_t Tile::getClientIndexOfCreature(const std::shared_ptr<Player> &player, co
 		n = 0;
 	}
 
-	const TileItemVector* items = getItemList();
-	if (items) {
-		n += items->getTopItemCount();
+	// Context-aware: count only items visible to this player's context
+	uint32_t playerCtx = player->getWorldContextId();
+	auto visibleItems = getItemsForContext(playerCtx);
+	for (const auto& item : visibleItems) {
+		if (item->isAlwaysOnTop()) {
+			++n;
+		}
 	}
 
 	if (const CreatureVector* creatures = getCreatures()) {
@@ -1504,11 +1508,14 @@ int32_t Tile::getStackposOfCreature(const std::shared_ptr<Player> &player, const
 		n = 0;
 	}
 
-	const TileItemVector* items = getItemList();
-	if (items) {
-		n += items->getTopItemCount();
-		if (n >= 10) {
-			return -1;
+	// Context-aware: count only items visible to this player's context
+	uint32_t playerCtx = player->getWorldContextId();
+	auto visibleItems = getItemsForContext(playerCtx);
+	for (const auto& item : visibleItems) {
+		if (item->isAlwaysOnTop()) {
+			if (++n >= 10) {
+				return -1;
+			}
 		}
 	}
 
@@ -1707,13 +1714,12 @@ std::shared_ptr<Thing> Tile::getThingForPlayer(const std::shared_ptr<Player> &pl
 		uint32_t visibleTopCount = 0;
 		for (auto it = items->getBeginTopItem(), end = items->getEndTopItem(); it != end; ++it) {
 			const auto &item = *it;
-			// Players in private contexts should NOT see/interact with map items
-			bool shouldCount = false;
-			if (item->isVisibleToAllContexts()) {
-				shouldCount = (playerCtx == 0); // Only global context
-			} else {
-				shouldCount = (item->getWorldContextId() == playerCtx);
-			}
+			// World Context System: determine which items are visible to this player
+			// - Map items (VISIBLE_TO_ALL) are visible to everyone
+			// - Context-specific items are only visible to players in that context
+			bool shouldCount = item->isVisibleToAllContexts() || 
+			                   item->getWorldContextId() == 0 ||
+			                   item->getWorldContextId() == playerCtx;
 			
 			if (shouldCount) {
 				if (index == visibleTopCount) {
@@ -1751,13 +1757,12 @@ std::shared_ptr<Thing> Tile::getThingForPlayer(const std::shared_ptr<Player> &pl
 		uint32_t visibleDownCount = 0;
 		for (auto it = items->getBeginDownItem(), end = items->getEndDownItem(); it != end; ++it) {
 			const auto &item = *it;
-			// Players in private contexts should NOT see/interact with map items
-			bool shouldCount = false;
-			if (item->isVisibleToAllContexts()) {
-				shouldCount = (playerCtx == 0); // Only global context
-			} else {
-				shouldCount = (item->getWorldContextId() == playerCtx);
-			}
+			// World Context System: determine which items are visible to this player
+			// - Map items (VISIBLE_TO_ALL) are visible to everyone
+			// - Context-specific items are only visible to players in that context
+			bool shouldCount = item->isVisibleToAllContexts() || 
+			                   item->getWorldContextId() == 0 ||
+			                   item->getWorldContextId() == playerCtx;
 			
 			if (shouldCount) {
 				if (index == visibleDownCount) {
@@ -2235,38 +2240,49 @@ std::vector<std::shared_ptr<Item>> Tile::getItemsForContext(uint32_t contextId) 
 	
 	// Get base items (from physical tile)
 	const auto* baseItems = getItemList();
-	if (baseItems) {
-		for (const auto& item : *baseItems) {
-			// In global context (0): show map items and global items
-			if (contextId == 0) {
+	
+	if (contextId == 0) {
+		// Global context: show map items and global items
+		if (baseItems) {
+			for (const auto& item : *baseItems) {
 				if (item->isVisibleToAllContexts() || item->getWorldContextId() == 0) {
-					visibleItems.push_back(item);
-				}
-			} else {
-				// In private context: only show items from this context
-				// (map items are "hidden" for private contexts)
-				if (item->getWorldContextId() == contextId) {
 					visibleItems.push_back(item);
 				}
 			}
 		}
-	}
-	
-	// Add ground if in global context
-	if (contextId == 0 && ground) {
-		// Ground is always at position 0, but we're iterating items only
-		// Ground is handled separately in protocol
-	}
-	
-	// Get layer overrides (cloned items for this context)
-	if (contextId != 0) {
-		// Create explicit copy since tilePos is accessed from const method
+	} else {
+		// Private context: check if we have a layer for this tile
 		const Position layerPos(tilePos.x, tilePos.y, tilePos.z);
 		auto* layer = TileLayerManager::getInstance().getLayer(layerPos, contextId);
+		
 		if (layer) {
-			// Add cloned items from layer
+			// Layer exists: use cloned items from layer
 			for (const auto& item : layer->clonedItems) {
 				visibleItems.push_back(item);
+			}
+			// Also add any items specifically dropped in this context
+			if (baseItems) {
+				for (const auto& item : *baseItems) {
+					if (item->getWorldContextId() == contextId) {
+						visibleItems.push_back(item);
+					}
+				}
+			}
+		} else {
+			// NO layer exists: FALLBACK to map base items
+			// This ensures the map is visible in areas not pre-warmed
+			// Player sees the original map, but items dropped go to their context
+			if (baseItems) {
+				for (const auto& item : *baseItems) {
+					// Show map items (no context = VISIBLE_TO_ALL) and global items (context 0)
+					if (item->isVisibleToAllContexts() || item->getWorldContextId() == 0) {
+						visibleItems.push_back(item);
+					}
+					// Also show items specifically for this context (drops, etc)
+					else if (item->getWorldContextId() == contextId) {
+						visibleItems.push_back(item);
+					}
+				}
 			}
 		}
 	}
@@ -2275,19 +2291,18 @@ std::vector<std::shared_ptr<Item>> Tile::getItemsForContext(uint32_t contextId) 
 }
 
 bool Tile::hasFlagForContext(TileFlags_t flag, uint32_t contextId) const {
-	// Check ground first
+	// Check ground first - ground is always visible in all contexts
 	if (ground) {
 		const ItemType& it = Item::items[ground->getID()];
 		if (flag == TILESTATE_BLOCKSOLID && it.blockSolid) {
-			// Ground is always visible (part of map)
-			if (contextId == 0) {
-				return true;
-			}
-			// In private contexts, ground doesn't block (it's "virtual")
+			return true;
+		}
+		if (flag == TILESTATE_BLOCKPATH && it.blockPathFind) {
+			return true;
 		}
 	}
 	
-	// Check visible items only
+	// Check visible items (uses fallback logic for non-prewarmed areas)
 	auto visibleItems = getItemsForContext(contextId);
 	for (const auto& item : visibleItems) {
 		const ItemType& it = Item::items[item->getID()];

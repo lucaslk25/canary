@@ -6840,6 +6840,10 @@ void ProtocolGame::sendContextSwitch(uint32_t contextId) {
 	writeToOutputBuffer(msg);
 }
 
+void ProtocolGame::forgetCreature(uint32_t creatureId) {
+	knownCreatureSet.erase(creatureId);
+}
+
 void ProtocolGame::removeMagicEffect(const Position &pos, uint16_t type) {
 	if (oldProtocol && type > 0xFF) {
 		return;
