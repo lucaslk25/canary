@@ -313,8 +313,6 @@ private:
 	void sendMagicEffect(const Position &pos, uint16_t type);
 	void removeMagicEffect(const Position &pos, uint16_t type);
 	void sendRestingStatus(uint8_t protection);
-	void sendContextSwitch(uint32_t contextId);
-	void forgetCreature(uint32_t creatureId);
 	void sendCreatureHealth(const std::shared_ptr<Creature> &creature);
 	void sendPartyCreatureUpdate(const std::shared_ptr<Creature> &target);
 	void sendPartyCreatureShield(const std::shared_ptr<Creature> &target);

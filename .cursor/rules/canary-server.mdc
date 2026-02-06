@@ -1,0 +1,88 @@
+---
+description: Canary OT Server conventions and common patterns
+alwaysApply: true
+---
+
+# Canary OT Server - Development Guide
+
+## Build & Run
+
+**NEVER compile the OTClient** — the user compiles it manually on Windows.
+**ALWAYS compile the server in debug mode** using the boilerplate below.
+
+### Boilerplate: Compile + Start + Monitor
+
+```bash
+# 1. Kill any running instance
+pkill -f canary-debug 2>/dev/null; sleep 2
+
+# 2. Compile in debug mode (uses recompile.sh)
+cd /home/lucaslucas/repos/canary && ./recompile.sh --preset linux-debug --build-only 2>&1 | tail -15
+
+# 3. Start server with logs saved to file
+nohup ./canary-debug > /tmp/canary.log 2>&1 &
+
+# 4. Monitor startup (takes ~60-90 seconds for full init)
+#    Poll with increasing intervals until ready or error
+sleep 10 && tail -20 /tmp/canary.log
+# Then keep checking:
+sleep 30 && tail -10 /tmp/canary.log && pgrep canary-debug
+```
+
+**Startup is complete** when logs show items loading finished and the process is still alive (`pgrep canary-debug` returns a PID). If the process dies, check logs for errors.
+
+### Quick recompile (no restart needed for checking compilation)
+```bash
+cd /home/lucaslucas/repos/canary && ./recompile.sh --preset linux-debug --build-only 2>&1 | tail -15
+```
+
+## Architecture
+
+- **Event-driven** with Dispatcher pattern and ASIO
+- **Spectators system** — `Spectators().find<Player>(pos, true)` finds nearby entities
+- **Protocol layer** — `ProtocolGame` manages per-client state including `knownCreatureSet`
+- **Shared pointers** everywhere — use `std::shared_ptr<Player>`, `std::shared_ptr<Creature>`, etc.
+- **Lua scripting** — talkactions, actions, events all scriptable via Lua
+
+## Key Protocol Concepts
+
+| Opcode | Name | Purpose |
+|--------|------|---------|
+| `0x64` | MapDescription | Full map rebuild (used in teleport/login) |
+| `0x69` | UpdateTile | Rebuild single tile |
+| `0x6A` | AddTileThing | Add creature/item to tile (CreatureAppear) |
+| `0x6C` | RemoveTileThing | Remove creature/item from tile |
+| `0x6D` | CreatureMove | Move creature between tiles |
+| `0x61` | NewCreature | Creature not in knownCreatureSet (full data sent) |
+| `0x62` | KnownCreature | Creature already known (minimal update, sprite renders immediately) |
+
+## Critical: knownCreatureSet
+
+Each `ProtocolGame` instance tracks which creatures the client has seen via `knownCreatureSet`. This determines whether creatures are sent as "new" (`0x61`) or "known" (`0x62`). **Never clear this set unless absolutely necessary** — it breaks sprite rendering.
+
+## Common Patterns
+
+### Making a creature appear for a spectator (like /ghost)
+```cpp
+spectator->sendCreatureAppear(creature, position, true);
+```
+
+### Making a creature disappear for a spectator
+```cpp
+spectator->sendRemoveTileThing(position, stackpos);
+```
+
+### Getting stackpos for a creature
+```cpp
+int32_t stackpos = tile->getStackposOfCreature(viewer, creature);
+```
+
+### Sending full map refresh
+```cpp
+player->sendRemoveTileThing(pos, selfStackpos);  // Remove self first
+player->sendMapDescription(pos);                   // Then full map
+```
+
+## Language & Communication
+
+The user communicates in **Brazilian Portuguese**. Respond in Portuguese when addressing the user. Code comments and documentation should be in **English**.

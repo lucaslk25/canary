@@ -6830,20 +6830,6 @@ void ProtocolGame::sendMagicEffect(const Position &pos, uint16_t type) {
 	writeToOutputBuffer(msg);
 }
 
-void ProtocolGame::sendContextSwitch(uint32_t contextId) {
-	// Clear known creatures - client will receive fresh creature data in MapDescription
-	knownCreatureSet.clear();
-	
-	NetworkMessage msg;
-	msg.addByte(0x39);
-	msg.add<uint32_t>(contextId);
-	writeToOutputBuffer(msg);
-}
-
-void ProtocolGame::forgetCreature(uint32_t creatureId) {
-	knownCreatureSet.erase(creatureId);
-}
-
 void ProtocolGame::removeMagicEffect(const Position &pos, uint16_t type) {
 	if (oldProtocol && type > 0xFF) {
 		return;

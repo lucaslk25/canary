@@ -3,7 +3,7 @@
 ## Current Status
 
 ### What's Working
-- [x] Context creation and switching
+- [x] Context creation and switching (ghost-style, no custom packets)
 - [x] Player isolation between contexts (can't see each other)
 - [x] Item context filtering (drop, pickup, loot)
 - [x] Blood/effects context filtering
@@ -11,6 +11,10 @@
 - [x] Player movement in pre-loaded area (smooth, no errors)
 - [x] Position synchronization after context switch
 - [x] Race condition fix (no more "creature not found" spam)
+- [x] Player appear/disappear with immediate sprite rendering (ghost-style)
+- [x] Visual effects: POFF on leave, Avatar Appear on enter
+- [x] No phantom clones or lingering names
+- [x] No client crashes during context switch
 
 ### Known Issues
 
@@ -264,7 +268,7 @@ When migrating to a newer architecture, the key concepts to preserve are:
 2. **Visibility Filter** - `canSeeCreature` checks context match
 3. **Packet Filter** - `sendMoveCreature` blocks cross-context packets
 4. **Race Condition Guard** - `needsContextRefresh` flag during transition
-5. **Client Position Sync** - Reset `m_mapKnown` on context switch
+5. **Ghost-Style Switching** - Reuse existing remove/appear packets (NO custom opcodes, NO clearing knownCreatureSet, NO resetting m_mapKnown)
 
 These patterns are architecture-agnostic and should work in any server/client implementation.
 

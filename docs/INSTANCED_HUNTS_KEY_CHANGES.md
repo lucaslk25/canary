@@ -20,12 +20,32 @@ This document describes the critical changes made to implement instanced hunts (
 ┌─────────────────────────────────────────────────────────────────┐
 │                        CLIENT (OTClient)                        │
 ├─────────────────────────────────────────────────────────────────┤
-│  - Receives context switch packet (0x39)                        │
-│  - Resets m_mapKnown to force position sync                     │
-│  - Receives fresh MapDescription with correct position          │
+│  - NO custom opcode needed (ghost-style mechanism)              │
+│  - m_mapKnown stays TRUE (normal client state)                  │
+│  - Receives standard remove/appear packets (same as /ghost)     │
 │  - Only sees creatures/items from current context               │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Core Design Principle: Ghost-Style Context Switching
+
+The context switch mechanism reuses the exact same packets as the `/ghost` GOD command:
+
+1. **To disappear:** `sendRemoveTileThing` (opcode `0x6C`) — removes creature from tile
+2. **To appear:** `sendCreatureAppear` (opcode `0x6A`) — adds creature to tile
+3. **Map rebuild:** `sendMapDescription` (opcode `0x64`) — rebuilds visible map
+
+**Why this works:** The `/ghost` command NEVER clears `knownCreatureSet` or resets
+`m_mapKnown`. Creatures stay "known" (opcode `0x62` update), so sprites render immediately.
+No custom packets, no engine changes, no client modifications needed.
+
+**What DIDN'T work (and why):** A custom `0x39` context switch packet was tried initially.
+It cleared `knownCreatureSet` and set `m_mapKnown = false`, which caused:
+- Creatures sent as "new" (opcode `0x61`) instead of "update" (`0x62`)
+- Sprites didn't render until player walked 1 tile
+- Client entered an intermediate state that broke rendering
 
 ---
 
@@ -38,7 +58,7 @@ This document describes the critical changes made to implement instanced hunts (
 ```cpp
 // Member variables added to Creature class
 uint32_t m_worldContextId = 0;  // 0 = global, 1+ = private instance
-bool m_needsContextRefresh = false;  // True after context switch
+bool m_needsContextRefresh = false;  // True during context transition
 
 // Methods added
 uint32_t getWorldContextId() const { return m_worldContextId; }
@@ -83,7 +103,6 @@ void ProtocolGame::sendMoveCreature(...) {
         if (creature != player) {
             return;  // Block all other creature movements
         }
-        // Player's first movement - send as full map refresh
         player->setNeedsContextRefresh(false);
         sendMapDescription(newPos);
         return;
@@ -98,48 +117,40 @@ void ProtocolGame::sendMoveCreature(...) {
 }
 ```
 
-### 4. Context Switch Packet (`src/server/network/protocol/protocolgame.cpp`)
+### 4. Context Manager - Ghost-Style Switching (`src/game/world_context/context_manager.cpp`)
 
-**Purpose:** Send new opcode 0x39 to client to signal context change.
+**Purpose:** Move players between contexts using the same mechanism as `/ghost`.
 
 ```cpp
-void ProtocolGame::sendContextSwitch(uint32_t contextId) {
-    // Clear known creatures - client will receive fresh data in MapDescription
-    knownCreatureSet.clear();
+void ContextManager::movePlayerToContext(player, targetContextId) {
+    // PHASE 1: Collect all information BEFORE any changes
+    //   - Old context spectators (need to stop seeing the player)
+    //   - New context spectators (need to start seeing the player)
+    //   - All creatures visible to switching player (need to be removed from client)
     
-    NetworkMessage msg;
-    msg.addByte(0x39);  // New opcode for context switch
-    msg.add<uint32_t>(contextId);
-    writeToOutputBuffer(msg);
+    // PHASE 2: Send REMOVE packets BEFORE context change
+    //   2a. Remove all visible creatures from switching player's client
+    //       (prevents cached sprite "clones" and lingering names)
+    //   2b. Remove switching player from old context spectators' clients
+    //       + POFF effect for spectators
+    //   2c. Pre-calculate player's own stackpos (while context still matches client view)
+    
+    // PHASE 3: Switch context (SERVER-SIDE ONLY - no packet to client)
+    //   player->setWorldContextId(targetContextId);
+    //   NO sendContextSwitch! Client stays in normal state.
+    
+    // PHASE 4: Rebuild switching player's view (like a teleport)
+    //   RemoveTileThing(self) → sendMapDescription → Avatar Appear effect
+    //   Client processes this as a normal teleport (m_mapKnown stays true)
+    
+    // PHASE 5: Make switching player APPEAR for new context spectators
+    //   EXACTLY like /ghost un-ghost: sendCreatureAppear(player, pos, true)
+    //   NO forgetCreature → creature stays "known" → 0x62 update → instant render
+    //   + Avatar Appear effect for spectators
 }
 ```
 
-### 5. Context Manager (`src/game/world_context/context_manager.cpp`)
-
-**Purpose:** Manage context lifecycle and player transitions.
-
-```cpp
-void ContextManager::movePlayerToContext(const std::shared_ptr<Player> &player, uint32_t targetContextId) {
-    if (!player) return;
-    
-    uint32_t currentContextId = player->getWorldContextId();
-    if (currentContextId == targetContextId) return;
-    
-    // 1. Mark player as needing refresh (blocks other creature movements)
-    player->setNeedsContextRefresh(true);
-    
-    // 2. Update player's context ID
-    player->setWorldContextId(targetContextId);
-    
-    // 3. Send context switch packet (triggers client reset)
-    player->sendContextSwitch(targetContextId);
-    
-    // 4. Send fresh map description with correct position
-    player->sendMapDescription(player->getPosition());
-}
-```
-
-### 6. Item Context Filtering (`src/game/game.cpp`, `src/map/map.cpp`)
+### 5. Item Context Filtering (`src/game/game.cpp`, `src/map/map.cpp`)
 
 **Purpose:** Items have context IDs and are only visible in their context.
 
@@ -154,83 +165,44 @@ ItemAttribute_t::WORLDCONTEXTID
 
 ---
 
-## Critical Changes - Client Side (OTClient)
+## Client Side (OTClient)
 
-### 1. Context Switch Packet Handler (`src/client/protocolgameparse.cpp`)
+### No Custom Packets Needed
 
-**Purpose:** Handle new opcode 0x39 and prepare for map refresh.
+The client requires **zero protocol changes** for context switching. All visibility
+is handled server-side using standard game packets:
 
-```cpp
-void ProtocolGame::parseContextSwitch(const InputMessagePtr& msg)
-{
-    const uint32_t newContextId = msg->getU32();
-    const uint32_t oldContextId = g_map.getCurrentContext();
-    
-    g_logger.info("[ContextSwitch] {} -> {}", oldContextId, newContextId);
-    
-    // Update context ID in map
-    g_map.setCurrentContext(newContextId);
-    
-    // CRITICAL: Reset m_mapKnown so MapDescription will update player position
-    // Without this, client keeps old position and movements desync
-    m_mapKnown = false;
-    
-    // Lua callback for UI updates
-    g_lua.callGlobalField("g_game", "onContextSwitch", oldContextId, newContextId);
-}
-```
+- `0x6C` (RemoveTileThing) — creature disappears
+- `0x6A` (AddTileThing / CreatureAppear) — creature appears
+- `0x64` (MapDescription) — full map rebuild
 
-### 2. Opcode Registration (`src/client/protocolgameparse.cpp`)
+### Context-Aware Cache System (Optional Infrastructure)
 
-**Purpose:** Register handler for new opcode.
+The client has a context-aware tile caching system for potential future use:
 
 ```cpp
-case 0x39:
-    parseContextSwitch(msg);
-    break;
+// map.h - Context cache infrastructure
+uint32_t m_currentContextId = 0;
+std::unordered_map<uint32_t, std::unique_ptr<ContextCache>> m_contextCaches;
+
+void setCurrentContext(uint32_t contextId);
+uint32_t getCurrentContext() const;
+ContextCache* getActiveCache();
 ```
 
-### 3. Map Context Tracking (`src/client/map.h`, `src/client/map.cpp`)
+This infrastructure exists but is **not required** for the current ghost-style
+context switching. It may be useful for future features like pre-caching
+context tile data on the client side.
 
-**Purpose:** Track current context for the client.
+---
 
-```cpp
-// Member variable
-uint32_t m_currentContext = 0;
+## Visual Effects
 
-// Methods
-uint32_t getCurrentContext() const { return m_currentContext; }
-void setCurrentContext(uint32_t contextId) { m_currentContext = contextId; }
-```
-
-### 4. getMappedThing Fallbacks (`src/client/protocolgameparse.cpp`)
-
-**Purpose:** Handle edge cases when creature lookup fails during transition.
-
-```cpp
-ThingPtr ProtocolGame::getMappedThing(const InputMessagePtr& msg) const {
-    // ... position parsing ...
-    
-    // Try exact stackpos first
-    if (const auto& thing = g_map.getThing(pos, stackpos)) {
-        return thing;
-    }
-    
-    // Fallback: If localPlayer is at this position, return it
-    if (m_localPlayer && m_localPlayer->getPosition() == pos) {
-        return m_localPlayer;
-    }
-    
-    // Try to find any creature at this position
-    if (const auto& tile = g_map.getTile(pos)) {
-        if (const auto& topCreature = tile->getTopCreature()) {
-            return topCreature;
-        }
-    }
-    
-    return nullptr;
-}
-```
+| Event | Who Sees | Effect |
+|-------|----------|--------|
+| Player enters context | Spectators in new context | `CONST_ME_AVATAR_APPEAR` (244) |
+| Player enters context | Switching player | `CONST_ME_AVATAR_APPEAR` (244) |
+| Player leaves context | Spectators in old context | `CONST_ME_POFF` (3) |
 
 ---
 
@@ -238,7 +210,7 @@ ThingPtr ProtocolGame::getMappedThing(const InputMessagePtr& msg) const {
 
 ### The Race Condition Problem
 
-**Problem:** When switching contexts, there was a race condition where monster/NPC movements were approved before the switch but sent after, causing "creature not found" errors.
+**Problem:** When switching contexts, monster/NPC movements were approved before the switch but sent after, causing "creature not found" errors.
 
 **Solution:** The `needsContextRefresh` flag blocks ALL creature movements (except player) during the transition window.
 
@@ -247,11 +219,19 @@ Before: [Monster moves] → [Approved] → [Buffer] → [Context Switch] → [Se
 After:  [Monster moves] → [needsContextRefresh=true] → [BLOCKED] → OK
 ```
 
-### The Position Desync Problem
+### The Phantom Player / Clone Problem
 
-**Problem:** After context switch, client had wrong player position because `m_mapKnown = true` prevented position update in MapDescription.
+**Problem:** When switching contexts near other players, "static clones" of creatures appeared and lingered until walking out of view and back.
 
-**Solution:** Reset `m_mapKnown = false` in `parseContextSwitch` so the next MapDescription updates the player position.
+**Solution:** Phase 2a explicitly sends `sendRemoveTileThing` for ALL creatures visible to the switching player before changing context. This clears the client's cached sprites.
+
+### The Sprite Not Rendering Problem
+
+**Problem:** After context switch, player sprites appeared as names only — the sprite didn't render until walking 1 tile.
+
+**Root Cause:** `sendContextSwitch(0x39)` cleared `knownCreatureSet` and set `m_mapKnown=false`. Creatures were sent as "new" (opcode `0x61`) instead of "update" (`0x62`), which didn't trigger immediate sprite rendering.
+
+**Solution:** Removed `sendContextSwitch` entirely. Context change is server-side only. Creatures stay "known" and the client stays in normal state (`m_mapKnown=true`). This is the exact same mechanism used by the `/ghost` GOD command, which has always worked perfectly.
 
 ---
 
@@ -263,28 +243,28 @@ After:  [Monster moves] → [needsContextRefresh=true] → [BLOCKED] → OK
 | `src/creatures/creature.hpp` | Context ID, refresh flag |
 | `src/creatures/players/player.hpp` | isInSameContext method |
 | `src/creatures/players/player.cpp` | canSeeCreature filter |
-| `src/server/network/protocol/protocolgame.cpp` | sendMoveCreature filter, sendContextSwitch |
-| `src/game/world_context/context_manager.cpp` | movePlayerToContext logic |
+| `src/server/network/protocol/protocolgame.cpp` | sendMoveCreature context filter |
+| `src/game/world_context/context_manager.cpp` | movePlayerToContext (ghost-style) |
 | `src/game/game.cpp` | Item context filtering |
 | `src/map/map.cpp` | Tile context awareness |
+| `src/items/tile.cpp` | getItemsForContext, getStackposOfCreature |
 
 ### Client (OTClient)
 | File | Changes |
 |------|---------|
-| `src/client/protocolgameparse.cpp` | parseContextSwitch, m_mapKnown reset, getMappedThing fallbacks |
-| `src/client/protocolgame.h` | Context switch method declaration |
-| `src/client/map.h` | m_currentContext member |
-| `src/client/map.cpp` | setCurrentContext, getCurrentContext |
+| `src/client/map.h` | Context cache infrastructure (optional) |
+| `src/client/map.cpp` | setCurrentContext, getActiveCache (optional) |
 
 ---
 
 ## Key Lessons Learned
 
-1. **Async buffers cause race conditions** - Events queued before state change may be sent after
-2. **Client map state is critical** - `m_mapKnown` controls whether position is updated
-3. **Creature lookup has fallbacks** - But they must be carefully controlled
-4. **Context filtering must happen at packet send** - Not just at event generation
-5. **Server and client must be in sync** - Both need to agree on player position
+1. **Reuse existing game mechanics** — The `/ghost` command already solved creature appear/disappear perfectly. Custom packets were unnecessary and harmful.
+2. **Don't clear knownCreatureSet** — Keeping creatures "known" ensures the client uses opcode `0x62` (update) which renders sprites immediately, unlike `0x61` (new) which has rendering delays.
+3. **Don't touch m_mapKnown** — Setting `m_mapKnown=false` puts the client in an intermediate state that breaks creature rendering. Let the client stay in normal operating mode.
+4. **Server-side only context changes** — The client doesn't need to know which context it's in. All filtering happens on the server.
+5. **Async buffers cause race conditions** — Events queued before state change may be sent after. Use the `needsContextRefresh` flag to block them.
+6. **Context filtering must happen at packet send** — Not just at event generation.
 
 ---
 

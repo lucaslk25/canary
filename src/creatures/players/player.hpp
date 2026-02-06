@@ -782,11 +782,9 @@ public:
 	void sendAddTileItem(const std::shared_ptr<Tile> &itemTile, const Position &pos, const std::shared_ptr<Item> &item);
 	void sendUpdateTileItem(const std::shared_ptr<Tile> &updateTile, const Position &pos, const std::shared_ptr<Item> &item);
 	void sendRemoveTileThing(const Position &pos, int32_t stackpos) const;
-	void forgetCreature(const std::shared_ptr<Creature> &creature);
 	void sendUpdateTileCreature(const std::shared_ptr<Creature> &creature);
 	void sendUpdateTile(const std::shared_ptr<Tile> &updateTile, const Position &pos) const;
 	void sendMapDescription(const Position &pos) const;
-	void sendContextSwitch(uint32_t contextId) const;
 
 	void sendChannelMessage(const std::string &author, const std::string &text, SpeakClasses type, uint16_t channel) const;
 	void sendChannelEvent(uint16_t channelId, const std::string &playerName, ChannelEvent_t channelEvent) const;

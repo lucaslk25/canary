@@ -6577,12 +6577,6 @@ void Player::sendRemoveTileThing(const Position &pos, int32_t stackpos) const {
 	}
 }
 
-void Player::forgetCreature(const std::shared_ptr<Creature> &creature) {
-	if (client && creature) {
-		client->forgetCreature(creature->getID());
-	}
-}
-
 void Player::sendUpdateTileCreature(const std::shared_ptr<Creature> &creature) {
 	if (client) {
 		client->sendUpdateTileCreature(creature->getPosition(), creature->getTile()->getClientIndexOfCreature(static_self_cast<Player>(), creature), creature);
@@ -8204,12 +8198,6 @@ void Player::sendUpdateTile(const std::shared_ptr<Tile> &updateTile, const Posit
 void Player::sendMapDescription(const Position &pos) const {
 	if (client) {
 		client->sendMapDescription(pos);
-	}
-}
-
-void Player::sendContextSwitch(uint32_t contextId) const {
-	if (client) {
-		client->sendContextSwitch(contextId);
 	}
 }
 

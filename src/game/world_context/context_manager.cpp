@@ -283,43 +283,53 @@ void ContextManager::movePlayerToContext(const std::shared_ptr<Player> &player, 
 		player->sendRemoveTileThing(info.pos, info.stackpos);
 	}
 
-	// 2b. Remove switching player from OLD context spectators' clients (with poff effect)
+	// 2b. Remove switching player from OLD context spectators' clients
 	for (const auto &info : oldContextPlayerRemoves) {
 		if (info.stackpos >= 0) {
-			info.spectator->sendMagicEffect(originalPos, CONST_ME_POFF);
 			info.spectator->sendRemoveTileThing(originalPos, info.stackpos);
+			info.spectator->sendMagicEffect(originalPos, CONST_ME_POFF);
 		}
 	}
 
+	// 2c. Pre-calculate the switching player's OWN stackpos AFTER creature removes
+	//     but BEFORE context change. Must be done here because:
+	//     - After Phase 2a, other creatures are removed from client → stackpos changed
+	//     - Before Phase 3, context is still old → item filtering matches client's view
+	int32_t playerOwnStackpos = playerTile->getStackposOfCreature(player, player);
+	g_logger().info("[Context] Player's own stackpos (pre-context-change): {}", playerOwnStackpos);
+
 	// ========================================================================
-	// PHASE 3: Switch context
+	// PHASE 3: Switch context (server-side only, NO packet to client)
 	// ========================================================================
+	// KEY INSIGHT: The /ghost command works perfectly because it NEVER sends
+	// sendContextSwitch (0x39) which clears knownCreatureSet and sets m_mapKnown=false.
+	// The ghost command keeps creatures "known" → opcode 0x62 (update) → sprite renders.
+	// Our 0x39 packet was making creatures "new" → opcode 0x61 → sprite didn't render.
+	// Solution: just update context server-side, then use ghost-style remove/appear.
 	player->setWorldContextId(targetContextId);
 
 	// ========================================================================
-	// PHASE 4: Rebuild switching player's view
+	// PHASE 4: Rebuild switching player's view (like a teleport, NOT a context switch)
 	// ========================================================================
-
-	// 4a. Send context switch packet (clears server-side knownCreatureSet)
-	player->sendContextSwitch(targetContextId);
-
-	// 4b. Send full map description (opcode 0x64) to rebuild the entire client map
-	//     This replaces the old 1-tile teleport which only sent partial map updates
-	//     Combined with m_mapKnown=false from sendContextSwitch, this forces full rebuild
+	// Use the same pattern as a regular teleport in sendMoveCreature:
+	// RemoveTileThing(self) → sendMapDescription
+	// The client stays in normal state (m_mapKnown=true), creatures render properly.
+	if (playerOwnStackpos >= 0) {
+		player->sendRemoveTileThing(originalPos, playerOwnStackpos);
+	}
 	player->sendMapDescription(originalPos);
-
-	// 4c. Avatar appear effect for the switching player (arriving in new context)
 	player->sendMagicEffect(originalPos, CONST_ME_AVATAR_APPEAR);
 
 	// ========================================================================
 	// PHASE 5: Make switching player APPEAR for new context spectators
 	// ========================================================================
+	// Use EXACTLY the same mechanism as /ghost un-ghost (player_functions.cpp line 3477):
+	// sendCreatureAppear(player, position, true)
+	// NO forgetCreature - creature stays "known" → 0x62 update → sprite renders immediately
 	for (const auto &specPlayer : newContextSpectators) {
-		g_logger().info("[Context] Sending creature appear to {} for {}",
+		g_logger().info("[Context] Sending creature appear (ghost-style) to {} for {}",
 			specPlayer->getName(), player->getName());
-		// Must forget first so server sends full creature data (opcode 0x61), not update (0x62)
-		specPlayer->forgetCreature(player);
-		specPlayer->sendCreatureAppear(player, originalPos, false);
+		specPlayer->sendCreatureAppear(player, originalPos, true);
 		specPlayer->sendMagicEffect(originalPos, CONST_ME_AVATAR_APPEAR);
 	}
 }

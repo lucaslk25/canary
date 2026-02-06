@@ -1,0 +1,85 @@
+---
+description: Guide for the Instanced Hunts (World Context) system - isolated game instances for players
+alwaysApply: true
+---
+
+# Instanced Hunts - World Context System
+
+## Project Overview
+
+We are building an **Instanced Hunts** system on Canary OT Server + OTClient. Players enter isolated world contexts where they don't see creatures, items, or effects from other contexts. Independent respawns, no map duplication.
+
+- **Context 0** = global (default world for all players)
+- **Context 1+** = private instances
+- `CONTEXT_VISIBLE_TO_ALL` (UINT32_MAX) = map items without explicit context, visible everywhere
+
+## Architecture: Ghost-Style Context Switching
+
+Context switching reuses the `/ghost` GOD command mechanism. NO custom packets, NO engine changes.
+
+### How it works (movePlayerToContext)
+
+1. **Phase 1** - Collect spectators and visible creatures BEFORE any changes
+2. **Phase 2** - Send `sendRemoveTileThing` to clear old creatures from client
+3. **Phase 3** - `setWorldContextId()` server-side only (NO packet to client)
+4. **Phase 4** - `sendRemoveTileThing(self)` + `sendMapDescription` (like a teleport)
+5. **Phase 5** - `sendCreatureAppear(player, pos, true)` for new context spectators (like /ghost un-ghost)
+
+### Critical: Why Ghost-Style Works
+
+The `/ghost` command NEVER clears `knownCreatureSet` or resets `m_mapKnown`. Creatures stay "known" → opcode `0x62` (update) → sprites render immediately. A previous custom `0x39` packet approach cleared these and broke rendering (sprites only appeared after walking 1 tile).
+
+### Key Rules
+
+- **NEVER** send custom context switch packets to the client
+- **NEVER** clear `knownCreatureSet` during context switch
+- **NEVER** set `m_mapKnown = false` during context switch
+- **NEVER** call `forgetCreature` before `sendCreatureAppear` during context switch
+- **ALWAYS** keep the client in normal state (`m_mapKnown = true`)
+- **ALWAYS** reuse existing game mechanics (remove/appear/teleport packets)
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/game/world_context/context_manager.cpp` | Core: movePlayerToContext, createContext, prewarmContext |
+| `src/game/world_context/context_manager.hpp` | ContextManager singleton, WorldContext class |
+| `src/game/world_context/tile_layer_manager.hpp` | Per-tile context layers for cloned items |
+| `src/creatures/creature.hpp` | worldContextId, needsContextRefresh on Creature |
+| `src/creatures/players/player.cpp` | canSeeCreature context filter, isInSameContext |
+| `src/server/network/protocol/protocolgame.cpp` | sendMoveCreature context filter, race condition guard |
+| `src/items/tile.cpp` | getItemsForContext, getStackposOfCreature (context-aware) |
+| `src/lua/functions/creatures/player/player_functions.cpp` | Lua bindings: setWorldContext, createWorldContext |
+| `docs/INSTANCED_HUNTS_KEY_CHANGES.md` | Full technical documentation |
+| `docs/INSTANCED_HUNTS_ROADMAP.md` | Feature roadmap and known issues |
+
+## Visual Effects
+
+| Event | Who sees | Effect |
+|-------|----------|--------|
+| Player enters context | New context spectators | `CONST_ME_AVATAR_APPEAR` (244) |
+| Player enters context | Switching player | `CONST_ME_AVATAR_APPEAR` (244) |
+| Player leaves context | Old context spectators | `CONST_ME_POFF` (3) |
+
+## Race Condition Guard
+
+`needsContextRefresh` flag on Creature blocks ALL creature movement packets (except the player's own) during the transition window. Without this, movements queued before the switch get sent after, causing "creature not found" errors.
+
+## Stackpos Calculation Order
+
+When removing creatures from client during context switch, sort by **descending stackpos** within the same tile position. This ensures lower stackpos values stay valid after higher ones are removed.
+
+## Known Issues (Not Yet Fixed)
+
+- NPCs in context 0 are invisible in private contexts
+- Stairs/holes/ladders don't work in private contexts (actionId/uniqueId not preserved)
+- Movement breaks outside pre-loaded tile radius
+- No monster respawn system for private contexts
+- No context cleanup when all players leave
+
+## Development Philosophy
+
+- **Reuse existing game mechanics** — the game already has solutions (ghost, teleport, spectators). Read and reuse, don't reinvent.
+- **Server-side filtering only** — the client doesn't need to know about contexts. All filtering happens on the server.
+- **No client engine changes** — everything works with standard OT protocol packets.
+- **Analyze before coding** — when stuck, study how the existing game handles the same problem (e.g., /ghost for visibility, sendMoveCreature for teleports).

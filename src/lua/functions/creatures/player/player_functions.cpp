@@ -5067,12 +5067,13 @@ int PlayerFunctions::luaPlayerSetWorldContextId(lua_State* L) {
 
 	uint32_t contextId = Lua::getNumber<uint32_t>(L, 2, 0);
 	
-	// Use movePlayerToContext to properly switch contexts
+	// Use movePlayerToContext to properly switch contexts (ghost-style)
 	// This will:
-	// 1. Update player's contextId
-	// 2. Track/untrack in contexts
-	// 3. Send context switch packet to client (0x39)
-	// 4. Send full map description
+	// 1. Remove visible creatures from player's client
+	// 2. Remove player from old context spectators
+	// 3. Update player's contextId (server-side only)
+	// 4. Rebuild player's view (teleport-style map description)
+	// 5. Make player appear for new context spectators
 	g_contextManager().movePlayerToContext(player, contextId);
 	
 	Lua::pushBoolean(L, true);
@@ -5097,7 +5098,7 @@ int PlayerFunctions::luaPlayerCreateWorldContext(lua_State* L) {
 		return 1;
 	}
 	
-	// Move player to the new context (sends packet 0x39 and map)
+	// Move player to the new context (ghost-style switching)
 	g_contextManager().movePlayerToContext(player, newContextId);
 	
 	// Return the new context ID
